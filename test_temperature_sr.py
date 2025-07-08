@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Скрипт для тестирования обученной температурной Super-Resolution модели
+Скрипт для тестирования обученной SwinIR температурной Super-Resolution модели
 """
 
 import argparse
@@ -8,20 +8,21 @@ import os
 import numpy as np
 import torch
 from tqdm import tqdm
+import cv2
 import matplotlib
+
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
-from data_preprocessing import TemperatureDataPreprocessor
-from basicsr.utils import tensor2img, imwrite  # ← Changed this line
-from hybrid_model import TemperatureSRModel     # ← Changed this line
-from config_temperature import *
+from models.network_swinir import SwinIR
+from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
+from data.data_loader import TemperatureDataset
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Test Temperature Super-Resolution Model')
+    parser = argparse.ArgumentParser(description='Test Temperature SwinIR Super-Resolution Model')
     parser.add_argument('--model_path', type=str, required=True,
-                        help='Path to trained model')
+                        help='Path to trained model checkpoint')
     parser.add_argument('--input_npz', type=str, required=True,
                         help='Input NPZ file for testing')
     parser.add_argument('--output_dir', type=str, default='./test_results',
@@ -30,30 +31,61 @@ def parse_args():
                         help='Number of samples to test')
     parser.add_argument('--save_comparison', action='store_true',
                         help='Save comparison plots')
-    parser.add_argument('--stats_path', type=str, default=None,
-                        help='Path to preprocessor statistics')
+    parser.add_argument('--scale_factor', type=int, default=4,
+                        help='Super-resolution scale factor')
+    parser.add_argument('--patch_size', type=int, default=128,
+                        help='Patch size used in training')
+    parser.add_argument('--window_size', type=int, default=8,
+                        help='Window size for SwinIR')
     return parser.parse_args()
 
 
-def test_model(model, test_data, save_path=None):
+def define_model(args):
+    """Определение модели SwinIR для температурных данных"""
+    model = SwinIR(
+        upscale=args.scale_factor,
+        in_chans=1,  # Одноканальные данные
+        img_size=args.patch_size,
+        window_size=args.window_size,
+        img_range=1.,
+        depths=[6, 6, 6, 6, 6, 6],
+        embed_dim=180,
+        num_heads=[6, 6, 6, 6, 6, 6],
+        mlp_ratio=2,
+        upsampler='nearest+conv',
+        resi_connection='1conv'
+    )
+    return model
+
+
+def test_model(model, test_data, device):
     """Тестирование модели на одном образце"""
-    model.net_g.eval()
+    model.eval()
 
     with torch.no_grad():
         # Подготовка данных
-        lr_tensor = test_data['lq'].unsqueeze(0).cuda()
-        hr_tensor = test_data['gt'].unsqueeze(0).cuda()
+        lr_tensor = test_data['lq'].unsqueeze(0).to(device)
+        hr_tensor = test_data['gt'].unsqueeze(0).to(device)
+
+        # Паддинг для window_size
+        _, _, h_old, w_old = lr_tensor.size()
+        window_size = 8
+        h_pad = (h_old // window_size + 1) * window_size - h_old
+        w_pad = (w_old // window_size + 1) * window_size - w_old
+        lr_tensor = torch.cat([lr_tensor, torch.flip(lr_tensor, [2])], 2)[:, :, :h_old + h_pad, :]
+        lr_tensor = torch.cat([lr_tensor, torch.flip(lr_tensor, [3])], 3)[:, :, :, :w_old + w_pad]
 
         # Прогон через модель
-        sr_tensor = model.net_g(lr_tensor)
+        sr_tensor = model(lr_tensor)
+
+        # Обрезка паддинга
+        sr_tensor = sr_tensor[..., :h_old * test_data['scale_factor'], :w_old * test_data['scale_factor']]
         sr_tensor = torch.clamp(sr_tensor, 0, 1)
 
     # Конвертация в numpy
-    lr_img = tensor2img([lr_tensor])
-    hr_img = tensor2img([hr_tensor])
-    sr_img = tensor2img([sr_tensor])
-
-
+    lr_img = lr_tensor[0, 0, :h_old, :w_old].cpu().numpy()
+    hr_img = hr_tensor[0, 0].cpu().numpy()
+    sr_img = sr_tensor[0, 0].cpu().numpy()
 
     # Восстановление оригинальных значений температуры
     if 'metadata' in test_data:
@@ -72,14 +104,25 @@ def test_model(model, test_data, save_path=None):
     }
 
     # Вычисление метрик
+    # Конвертируем в uint8 для PSNR/SSIM
+    hr_uint8 = ((hr_img - hr_img.min()) / (hr_img.max() - hr_img.min()) * 255).astype(np.uint8)
+    sr_uint8 = ((sr_img - sr_img.min()) / (sr_img.max() - sr_img.min()) * 255).astype(np.uint8)
+
+    psnr = calculate_psnr(sr_uint8, hr_uint8, crop_border=0)
+    ssim = calculate_ssim(sr_uint8, hr_uint8, crop_border=0)
+
+    # Метрики в физических единицах
     mse = np.mean((sr_img - hr_img) ** 2)
-    psnr = 20 * np.log10(np.max(hr_img) / np.sqrt(mse)) if mse > 0 else float('inf')
+    mae = np.mean(np.abs(sr_img - hr_img))
+    max_error = np.max(np.abs(sr_img - hr_img))
 
     results['metrics'] = {
-        'mse': mse,
         'psnr': psnr,
-        'temperature_error_mean': np.mean(np.abs(sr_img - hr_img)),
-        'temperature_error_max': np.max(np.abs(sr_img - hr_img))
+        'ssim': ssim,
+        'mse': mse,
+        'mae': mae,
+        'temperature_error_mean': mae,
+        'temperature_error_max': max_error
     }
 
     return results
@@ -116,7 +159,7 @@ def save_comparison_plot(results, save_path, idx):
 
     # Увеличенная область для детального сравнения
     h, w = results['hr'].shape
-    crop_size = min(h // 4, w // 4)
+    crop_size = min(h // 4, w // 4, 64)
     start_h, start_w = h // 2 - crop_size // 2, w // 2 - crop_size // 2
 
     hr_crop = results['hr'][start_h:start_h + crop_size, start_w:start_w + crop_size]
@@ -134,6 +177,7 @@ def save_comparison_plot(results, save_path, idx):
 
     # Добавляем метрики
     metrics_text = f"PSNR: {results['metrics']['psnr']:.2f} dB\n"
+    metrics_text += f"SSIM: {results['metrics']['ssim']:.4f}\n"
     metrics_text += f"MSE: {results['metrics']['mse']:.4f}\n"
     metrics_text += f"Mean Temp Error: {results['metrics']['temperature_error_mean']:.2f} K\n"
     metrics_text += f"Max Temp Error: {results['metrics']['temperature_error_max']:.2f} K"
@@ -152,75 +196,65 @@ def main():
     # Создаем выходную директорию
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Создаем конфигурацию для модели
-    opt = {
-        'name': name,
-        'model_type': model_type,
-        'scale': scale,
-        'num_gpu': 1,
-        'network_g': network_g,
-        'network_d': network_d,
-        'path': path,
-        'train': train,
-        'is_train': False,
-        'dist': False
-    }
+    # Устройство
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
     # Загружаем модель
     print(f"Loading model from {args.model_path}")
-    model = TemperatureSRModel(opt)
+    model = define_model(args).to(device)
 
-    # Load the checkpoint directly
-    checkpoint = torch.load(args.model_path, map_location='cuda')
+    # Загружаем checkpoint
+    checkpoint = torch.load(args.model_path, map_location=device)
 
     # Debug: print checkpoint keys
     if isinstance(checkpoint, dict):
         print(f"Checkpoint keys: {list(checkpoint.keys())}")
 
-    # Check if it's a full checkpoint or just the state dict
-    if isinstance(checkpoint, dict) and 'params' in checkpoint:
-        # It's a full checkpoint from training
-        model.net_g.load_state_dict(checkpoint['params'], strict=True)
-    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        # Alternative checkpoint format
-        model.net_g.load_state_dict(checkpoint['state_dict'], strict=True)
+    # Загружаем веса модели
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'], strict=True)
+        elif 'params' in checkpoint:
+            model.load_state_dict(checkpoint['params'], strict=True)
+        elif 'model' in checkpoint:
+            model.load_state_dict(checkpoint['model'], strict=True)
+        else:
+            # Пробуем загрузить напрямую
+            model.load_state_dict(checkpoint, strict=True)
     else:
-        # It's just the state dict
-        model.net_g.load_state_dict(checkpoint, strict=True)
+        # Это просто state dict
+        model.load_state_dict(checkpoint, strict=True)
 
     print("Model loaded successfully!")
-
-    model.net_g.eval()
-
-    # Создаем препроцессор
-    preprocessor = TemperatureDataPreprocessor()
-
-    # Загружаем статистику препроцессора если есть
-    if args.stats_path and os.path.exists(args.stats_path):
-        stats = np.load(args.stats_path)
-        preprocessor.stats = dict(stats)
-        print(f"Loaded preprocessor statistics from {args.stats_path}")
+    model.eval()
 
     # Загружаем тестовые данные
     print(f"Loading test data from {args.input_npz}")
-    #data = np.load(args.input_npz, allow_pickle=True)
-    #swaths = data['swath_array']
 
-    print(f"Loading test data from {args.input_npz}")
+    # Используем TemperatureDataset для загрузки данных
+    from data_preprocessing import TemperatureDataPreprocessor
+    preprocessor = TemperatureDataPreprocessor()
+
+    # Загружаем данные напрямую
     data = np.load(args.input_npz, allow_pickle=True)
-
-    # Проверяем какие ключи есть в файле
     print(f"Available keys in NPZ: {list(data.keys())}")
 
-    # Создаем структуру данных как в обучающем датасете
-    temperature = data['temperature'].astype(np.float32)
-    metadata = data['metadata'].item() if hasattr(data['metadata'], 'item') else data['metadata']
-
-    # Создаем список из одного элемента для совместимости
-    swaths = [{
-        'temperature': temperature,
-        'metadata': metadata
-    }]
+    # Обрабатываем данные в зависимости от формата
+    if 'temperature' in data and 'metadata' in data:
+        # Формат с отдельными полями
+        temperature = data['temperature'].astype(np.float32)
+        metadata = data['metadata'].item() if hasattr(data['metadata'], 'item') else data['metadata']
+        swaths = [{
+            'temperature': temperature,
+            'metadata': metadata
+        }]
+    elif 'swaths' in data:
+        swaths = data['swaths']
+    elif 'swath_array' in data:
+        swaths = data['swath_array']
+    else:
+        raise ValueError("Cannot find temperature data in the NPZ file")
 
     # Ограничиваем количество тестовых образцов
     num_samples = min(args.num_samples, len(swaths))
@@ -231,21 +265,31 @@ def main():
 
     for i in tqdm(range(num_samples), desc="Testing"):
         swath = swaths[i]
-        temp = swath['temperature']
-        meta = swath['metadata']
+        temp = swath['temperature'].astype(np.float32)
+        meta = swath.get('metadata', {})
 
         # Предобработка
         temp = preprocessor.crop_or_pad(temp)
+
+        # Убеждаемся, что размеры кратны scale_factor
+        h, w = temp.shape
+        h = h - h % args.scale_factor
+        w = w - w % args.scale_factor
+        temp = temp[:h, :w]
+
         temp_min, temp_max = np.min(temp), np.max(temp)
         temp_norm = preprocessor.normalize_temperature(temp)
 
-        # Создаем пару LR-HR
-        lr, hr = preprocessor.create_lr_hr_pair(temp_norm, scale_factor=4)
+        # Создаем LR версию простым даунсэмплингом для тестирования
+        lr = cv2.resize(temp_norm, (w // args.scale_factor, h // args.scale_factor),
+                        interpolation=cv2.INTER_AREA)
+        hr = temp_norm
 
         # Подготовка данных для модели
         test_data = {
             'lq': torch.from_numpy(lr).unsqueeze(0).float(),
             'gt': torch.from_numpy(hr).unsqueeze(0).float(),
+            'scale_factor': args.scale_factor,
             'metadata': {
                 'original_min': temp_min,
                 'original_max': temp_max,
@@ -254,7 +298,7 @@ def main():
         }
 
         # Тестирование
-        results = test_model(model, test_data)
+        results = test_model(model, test_data, device)
         all_metrics.append(results['metrics'])
 
         # Сохранение результатов
@@ -277,7 +321,9 @@ def main():
 
     print("\n=== Average Metrics ===")
     print(f"PSNR: {avg_metrics['psnr']:.2f} dB")
+    print(f"SSIM: {avg_metrics['ssim']:.4f}")
     print(f"MSE: {avg_metrics['mse']:.4f}")
+    print(f"MAE: {avg_metrics['mae']:.4f}")
     print(f"Mean Temperature Error: {avg_metrics['temperature_error_mean']:.2f} K")
     print(f"Max Temperature Error: {avg_metrics['temperature_error_max']:.2f} K")
 
@@ -287,7 +333,8 @@ def main():
         f.write("=== Test Results ===\n")
         f.write(f"Model: {args.model_path}\n")
         f.write(f"Test data: {args.input_npz}\n")
-        f.write(f"Number of samples: {num_samples}\n\n")
+        f.write(f"Number of samples: {num_samples}\n")
+        f.write(f"Scale factor: {args.scale_factor}\n\n")
         f.write("=== Average Metrics ===\n")
         for key, value in avg_metrics.items():
             f.write(f"{key}: {value:.4f}\n")

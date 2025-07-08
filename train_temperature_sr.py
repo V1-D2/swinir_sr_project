@@ -1,320 +1,326 @@
-#!/usr/bin/env python3
-"""
-Основной скрипт для обучения температурной Super-Resolution модели
-с инкрементальной загрузкой данных
-"""
-
-import argparse
-import logging
+# train_temperature_sr.py
 import os
-import random
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
+import argparse
+import time
 from datetime import datetime
-from collections import OrderedDict
-import gc
+import json
+from tqdm import tqdm
+import cv2
 
-from basicsr.utils import (get_time_str, get_root_logger, get_env_info,
-                           make_exp_dirs, set_random_seed, tensor2img)
-from basicsr.utils.options import dict2str
-from basicsr.data.prefetch_dataloader import CPUPrefetcher
-from basicsr.utils.registry import MODEL_REGISTRY
-
-# Импортируем наши модули
-from data_preprocessing import (TemperatureDataPreprocessor,
-                                IncrementalDataLoader,
-                                create_validation_set)
-from hybrid_model import TemperatureSRModel
-from config_temperature import (
-    name, model_type, scale, num_gpu, datasets, network_g, network_d,
-    path, train, val, logger as logger_config, dist_params,
-    temperature_specific, incremental_training
-)
+# Импорты из проекта
+from models.network_swinir import SwinIR
+from data.data_loader import create_train_val_dataloaders
+from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
+from utils.logger import Logger
+from utils.common import AverageMeter, save_checkpoint, load_checkpoint
 
 
-def check_training_progress(model, logger, current_iter):
-    """Проверка что модель действительно обучается"""
-    if hasattr(model, 'net_g'):
-        # Получаем норму градиентов
-        total_norm = 0
-        param_count = 0
-        for p in model.net_g.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-                param_count += 1
-
-        if param_count > 0:
-            total_norm = total_norm ** (1. / 2.)
-            logger.info(f'[Iter {current_iter}] Generator gradient norm: {total_norm:.4f}')
-
-            if total_norm < 1e-8:
-                logger.warning('WARNING: Generator gradients are near zero!')
-        else:
-            logger.warning('WARNING: No gradients found in generator!')
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Train Temperature Super-Resolution Model')
-    parser.add_argument('--data_dir', type=str, required=True,
-                        help='Directory containing NPZ files')
-    parser.add_argument('--output_dir', type=str, default='./experiments',
-                        help='Output directory for models and logs')
-    parser.add_argument('--num_epochs', type=int, default=100,
-                        help='Total number of epochs')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Resume from checkpoint')
-    parser.add_argument('--debug', action='store_true',
-                        help='Debug mode with reduced data')
-    parser.add_argument('--launcher', choices=['none', 'pytorch'], default='none',
-                        help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
-    return parser.parse_args()
-
-
-def setup_logger(opt):
-    """Настройка логирования"""
-    log_file = os.path.join(opt['path']['log'], f"train_{get_time_str()}.log")
-    logger = get_root_logger(logger_name='basicsr',
-                             log_level=logging.INFO,
-                             log_file=log_file)
-    logger.info(get_env_info())
-    logger.info(dict2str(opt))
-    return logger
-
-
-def create_dataloaders(args, opt, preprocessor, logger):
-    """Создание загрузчиков данных"""
-    # Получаем список NPZ файлов
-    npz_files = sorted([os.path.join(args.data_dir, f)
-                        for f in os.listdir(args.data_dir)
-                        if f.endswith('.npz')])
-
-    if args.debug:
-        npz_files = npz_files[:2]  # Используем только 2 файла в debug режиме
-
-    logger.info(f"Found {len(npz_files)} NPZ files")
-
-    # Разделяем на train и validation
-    val_file = npz_files[-1]
-    train_files = npz_files[:-1]
-
-    # Создаем инкрементальный загрузчик для обучения
-    train_loader = IncrementalDataLoader(
-        train_files,
-        preprocessor,
-        batch_size=opt['datasets']['train']['batch_size'],
-        scale_factor=opt['datasets']['train']['scale_factor'],
-        samples_per_file=opt['datasets']['train']['samples_per_file'] if not args.debug else 100
+def define_model(args):
+    """Определение модели SwinIR для температурных данных"""
+    model = SwinIR(
+        upscale=args.scale_factor,
+        in_chans=1,  # Одноканальные данные
+        img_size=args.patch_size,
+        window_size=8,
+        img_range=1.,
+        depths=[6, 6, 6, 6, 6, 6],
+        embed_dim=180,
+        num_heads=[6, 6, 6, 6, 6, 6],
+        mlp_ratio=2,
+        upsampler='nearest+conv',
+        resi_connection='1conv'
     )
-
-    # Создаем валидационный датасет
-    val_loader = create_validation_set(
-        val_file,
-        preprocessor,
-        n_samples=opt['datasets']['val']['n_samples'] if not args.debug else 10,
-        scale_factor=opt['datasets']['val']['scale_factor']
-    )
-
-    return train_loader, val_loader
+    return model
 
 
-def train_one_epoch(model, dataloader, current_iter, opt, logger, val_loader, epoch):
-    """Обучение на одной эпохе"""
-    model.net_g.train()
-    if hasattr(model, 'net_d'):
-        model.net_d.train()
+def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, device):
+    """Обучение одной эпохи"""
+    model.train()
 
-    prefetcher = CPUPrefetcher(dataloader)
-    train_data = prefetcher.next()
+    losses = AverageMeter()
+    psnrs = AverageMeter()
+    ssims = AverageMeter()
 
-    while train_data is not None:
-        current_iter += 1
+    # Прогресс бар
+    pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
 
-        # Обучение модели
-        model.feed_data(train_data)
-        model.optimize_parameters(current_iter)
+    for i, batch in enumerate(pbar):
+        # Загружаем данные
+        lq = batch['lq'].to(device)  # Low quality (LR)
+        gt = batch['gt'].to(device)  # Ground truth (HR)
 
-        if current_iter % 1000 == 0:
-            check_training_progress(model, logger, current_iter)
+        # Forward pass
+        sr = model(lq)
+        loss = criterion(sr, gt)
 
-        # Обновление learning rate
-        model.update_learning_rate(current_iter, warmup_iter=opt['train'].get('warmup_iter', -1))
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-        # Логирование
-        if current_iter % opt['logger']['print_freq'] == 0:
-            log_vars = model.get_current_log()
-            message = f'[Iter: {current_iter:07d}]'
-            for k, v in log_vars.items():
-                message += f' {k}: {v:.4e}'
-            logger.info(message)
+        # Вычисляем метрики
+        with torch.no_grad():
+            # Конвертируем в numpy для метрик
+            sr_np = sr.detach().cpu().numpy()
+            gt_np = gt.detach().cpu().numpy()
 
-        # Clean GPU memory every 50 iterations
-        if current_iter % 50 == 0:
-            torch.cuda.empty_cache()
+            psnr_val = 0
+            ssim_val = 0
 
-        # Сохранение модели
-        if current_iter % opt['logger']['save_checkpoint_freq'] == 0:
-            logger.info('Saving models and training states.')
-            model.save(epoch, current_iter)
+            # Вычисляем PSNR и SSIM для каждого изображения в батче
+            for j in range(sr_np.shape[0]):
+                sr_img = (sr_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
+                gt_img = (gt_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
 
-        # Валидация
-        if opt['val'] and current_iter % opt['val']['val_freq'] == 0:
-            model.validation(val_loader, current_iter, None,
-                             save_img=opt['val']['save_img'])
+                psnr_val += calculate_psnr(sr_img, gt_img, crop_border=0)
+                ssim_val += calculate_ssim(sr_img, gt_img, crop_border=0)
 
-        train_data = prefetcher.next()
+            psnr_val /= sr_np.shape[0]
+            ssim_val /= sr_np.shape[0]
 
-    return current_iter
+        # Обновляем метрики
+        losses.update(loss.item(), lq.size(0))
+        psnrs.update(psnr_val, lq.size(0))
+        ssims.update(ssim_val, lq.size(0))
+
+        # Обновляем прогресс бар
+        pbar.set_postfix({
+            'Loss': f'{losses.avg:.4f}',
+            'PSNR': f'{psnrs.avg:.2f}',
+            'SSIM': f'{ssims.avg:.4f}'
+        })
+
+        # Логирование каждые 100 итераций
+        if i % 100 == 0:
+            logger.log_training(epoch, i, losses.avg, psnrs.avg, ssims.avg)
+
+    return losses.avg, psnrs.avg, ssims.avg
 
 
-def main():
-    args = parse_args()
+def validate(model, val_loader, criterion, epoch, logger, device):
+    """Валидация модели"""
+    model.eval()
 
+    losses = AverageMeter()
+    psnrs = AverageMeter()
+    ssims = AverageMeter()
+
+    with torch.no_grad():
+        pbar = tqdm(val_loader, desc=f'Validation {epoch}')
+
+        for i, batch in enumerate(pbar):
+            lq = batch['lq'].to(device)
+            gt = batch['gt'].to(device)
+
+            # Forward pass
+            sr = model(lq)
+            loss = criterion(sr, gt)
+
+            # Метрики
+            sr_np = sr.cpu().numpy()
+            gt_np = gt.cpu().numpy()
+
+            for j in range(sr_np.shape[0]):
+                sr_img = (sr_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
+                gt_img = (gt_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
+
+                psnr_val = calculate_psnr(sr_img, gt_img, crop_border=0)
+                ssim_val = calculate_ssim(sr_img, gt_img, crop_border=0)
+
+                losses.update(loss.item(), 1)
+                psnrs.update(psnr_val, 1)
+                ssims.update(ssim_val, 1)
+
+            pbar.set_postfix({
+                'Loss': f'{losses.avg:.4f}',
+                'PSNR': f'{psnrs.avg:.2f}',
+                'SSIM': f'{ssims.avg:.4f}'
+            })
+
+    logger.log_validation(epoch, losses.avg, psnrs.avg, ssims.avg)
+
+    return losses.avg, psnrs.avg, ssims.avg
+
+
+def main(args):
+    """Основная функция обучения"""
     # Создаем директории
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'samples'), exist_ok=True)
 
-    # Обновляем конфигурацию путями
-    path['root'] = args.output_dir
-    path['experiments_root'] = os.path.join(args.output_dir, name)
-    path['models'] = os.path.join(path['experiments_root'], 'models')
-    path['training_states'] = os.path.join(path['experiments_root'], 'training_states')
-    path['log'] = os.path.join(path['experiments_root'], 'log')
-    path['visualization'] = os.path.join(path['experiments_root'], 'visualization')
+    # Инициализируем логгер
+    logger = Logger(os.path.join(args.output_dir, 'logs'))
 
-    # Создаем полную конфигурацию
-    opt = {
-        'name': name,
-        'model_type': model_type,
-        'scale': scale,
-        'num_gpu': num_gpu,
-        'manual_seed': train['manual_seed'],
-        'datasets': datasets,
-        'network_g': network_g,
-        'network_d': network_d,
-        'path': path,
-        'train': train,
-        'val': val,
-        'logger': logger_config,
-        'dist_params': dist_params,
-        'temperature_specific': temperature_specific,
-        'incremental_training': incremental_training,
-        'is_train': True
-    }
+    # Устройство
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # Инициализация distributed training
-    if args.launcher == 'none':
-        opt['dist'] = False
-    else:
-        opt['dist'] = True
-        if args.launcher == 'pytorch':
-            torch.distributed.init_process_group(backend='nccl')
+    # Создаем датасеты
+    train_files = [os.path.join(args.data_dir, f'train_{i}.npz') for i in range(1, 5)]
+    val_file = os.path.join(args.data_dir, 'train_1.npz')  # Используем часть первого файла для валидации
 
-    # Создаем директории
-    try:
-        make_exp_dirs(opt)
-    except FileNotFoundError:
-        # Create the directory if it doesn't exist
-        os.makedirs(opt['path']['experiments_root'], exist_ok=True)
-
-    # Настройка логгера
-    logger = setup_logger(opt)
-
-    # Установка random seed
-    seed = opt.get('manual_seed', None)
-    if seed is None:
-        seed = random.randint(1, 10000)
-    set_random_seed(seed)
-    logger.info(f'Random seed: {seed}')
-
-    # Создаем препроцессор
-    preprocessor = TemperatureDataPreprocessor(
-        target_height=datasets['train']['preprocessor_args']['target_height'],
-        target_width=datasets['train']['preprocessor_args']['target_width']
+    print("Creating data loaders...")
+    train_loader, val_loader = create_train_val_dataloaders(
+        train_files, val_file,
+        batch_size=args.batch_size,
+        scale_factor=args.scale_factor,
+        patch_size=args.patch_size
     )
 
-    # Создаем загрузчики данных
-    logger.info('Creating dataloaders...')
-    train_loader_manager, val_loader = create_dataloaders(args, opt, preprocessor, logger)
+    # Создаем модель
+    print("Creating model...")
+    model = define_model(args).to(device)
 
-    # Создаем модель напрямую
-    logger.info('Creating model...')
-    # Регистрируем модель, если еще не зарегистрирована
-    if 'TemperatureSRModel' not in MODEL_REGISTRY._obj_map:
-        MODEL_REGISTRY.register(TemperatureSRModel)
+    # Подсчет параметров
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
 
-    # Создаем экземпляр модели напрямую
-    model = TemperatureSRModel(opt)
+    # Loss function и optimizer
+    criterion = nn.L1Loss()
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
 
-    # Возобновление обучения
-    start_iter = 0
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.num_epochs, eta_min=1e-7
+    )
+
+    # Загружаем checkpoint если есть
+    start_epoch = 0
+    best_psnr = 0
+
     if args.resume:
-        logger.info(f'Resuming from {args.resume}')
-        model.resume_training(args.resume)
-        start_iter = model.begin_iter
+        checkpoint_path = os.path.join(args.output_dir, 'checkpoints', 'latest.pth')
+        if os.path.exists(checkpoint_path):
+            start_epoch, best_psnr = load_checkpoint(checkpoint_path, model, optimizer, scheduler)
+            print(f"Resumed from epoch {start_epoch} with best PSNR {best_psnr:.2f}")
+
+    # Сохраняем конфигурацию
+    config = vars(args)
+    config['model_params'] = total_params
+    with open(os.path.join(args.output_dir, 'config.json'), 'w') as f:
+        json.dump(config, f, indent=4)
 
     # Основной цикл обучения
-    logger.info('Start training...')
-    current_iter = start_iter
-    total_epochs = args.num_epochs
+    print("\nStarting training...")
+    for epoch in range(start_epoch, args.num_epochs):
+        print(f"\n{'=' * 50}")
+        print(f"Epoch {epoch + 1}/{args.num_epochs}")
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
+        print(f"{'=' * 50}")
 
-    for epoch in range(total_epochs):
-        logger.info(f'\n=== Epoch {epoch + 1}/{total_epochs} ===')
+        # Обучение
+        train_loss, train_psnr, train_ssim = train_one_epoch(
+            model, train_loader, criterion, optimizer, epoch + 1, logger, device
+        )
 
-        # Инкрементальное обучение по файлам
-        train_loader_manager.reset()
-        file_idx = 0
+        # Валидация
+        val_loss, val_psnr, val_ssim = validate(
+            model, val_loader, criterion, epoch + 1, logger, device
+        )
 
-        while True:
-            # Получаем dataloader для следующего файла
-            train_loader = train_loader_manager.get_next_dataloader()
-            if train_loader is None:
+        # Обновляем learning rate
+        scheduler.step()
+
+        # Сохраняем checkpoint
+        is_best = val_psnr > best_psnr
+        if is_best:
+            best_psnr = val_psnr
+
+        save_checkpoint({
+            'epoch': epoch + 1,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'best_psnr': best_psnr,
+            'args': args
+        }, is_best, args.output_dir)
+
+        # Сохраняем примеры каждые 5 эпох
+        if (epoch + 1) % 5 == 0:
+            save_sample_images(model, val_loader, epoch + 1, args.output_dir, device)
+
+        # Выводим итоги эпохи
+        print(f"\nEpoch {epoch + 1} Summary:")
+        print(f"  Train - Loss: {train_loss:.4f}, PSNR: {train_psnr:.2f}, SSIM: {train_ssim:.4f}")
+        print(f"  Val   - Loss: {val_loss:.4f}, PSNR: {val_psnr:.2f}, SSIM: {val_ssim:.4f}")
+        print(f"  Best PSNR: {best_psnr:.2f}")
+
+    print("\nTraining completed!")
+    print(f"Best validation PSNR: {best_psnr:.2f}")
+
+
+def save_sample_images(model, val_loader, epoch, output_dir, device, num_samples=4):
+    """Сохранение примеров результатов"""
+    model.eval()
+    samples_dir = os.path.join(output_dir, 'samples', f'epoch_{epoch}')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    with torch.no_grad():
+        for i, batch in enumerate(val_loader):
+            if i >= num_samples:
                 break
 
-            logger.info(f'Training on file {file_idx + 1}/{len(train_loader_manager.npz_files)}')
+            lq = batch['lq'].to(device)
+            gt = batch['gt'].to(device)
+            sr = model(lq)
 
-            # Обучаем на текущем файле
-            for file_epoch in range(incremental_training['epochs_per_file']):
-                logger.info(f'  File epoch {file_epoch + 1}/{incremental_training["epochs_per_file"]}')
-                current_iter = train_one_epoch(model, train_loader, current_iter, opt, logger, val_loader, epoch)
+            # Конвертируем в numpy и сохраняем
+            lq_np = (lq[0, 0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            gt_np = (gt[0, 0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            sr_np = (sr[0, 0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
 
-            # Сохраняем checkpoint после каждого файла
-            if incremental_training['checkpoint_per_file']:
-                logger.info(f'Saving checkpoint after file {file_idx + 1}')
-                model.save(epoch, current_iter)
+            # Создаем композитное изображение
+            h_lr, w_lr = lq_np.shape
+            h_hr, w_hr = gt_np.shape
 
-            # Уменьшаем learning rate между файлами
-            if incremental_training['learning_rate_decay_per_file'] < 1.0:
-                for optimizer in [model.optimizer_g, model.optimizer_d]:
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] *= incremental_training['learning_rate_decay_per_file']
-                logger.info(f'Learning rate decayed to: {model.optimizer_g.param_groups[0]["lr"]:.2e}')
+            # Апсэмплим LR для визуализации
+            lq_up = cv2.resize(lq_np, (w_hr, h_hr), interpolation=cv2.INTER_NEAREST)
 
-            file_idx += 1
+            # Соединяем изображения горизонтально
+            composite = np.hstack([lq_up, sr_np, gt_np])
 
-            # Очистка памяти
-            del train_loader
-            gc.collect()
-            torch.cuda.empty_cache()
+            # Сохраняем
+            cv2.imwrite(os.path.join(samples_dir, f'sample_{i + 1}.png'), composite)
 
-        # Валидация в конце эпохи
-        logger.info('Epoch validation...')
-        model.validation(val_loader, current_iter, None, save_img=True)
-
-        # Сохранение модели в конце эпохи
-        logger.info(f'Saving models at epoch {epoch + 1}')
-        model.save(epoch, current_iter)
-
-    logger.info('Training completed!')
-
-    # Финальное сохранение
-    model.save(total_epochs - 1, current_iter)
-
-    # Сохраняем статистику препроцессора
-    stats_path = os.path.join(path['models'], 'preprocessor_stats.npz')
-    np.savez(stats_path, **preprocessor.stats)
-    logger.info(f'Preprocessor statistics saved to {stats_path}')
+            # Также сохраняем отдельные изображения
+            cv2.imwrite(os.path.join(samples_dir, f'sample_{i + 1}_lr.png'), lq_np)
+            cv2.imwrite(os.path.join(samples_dir, f'sample_{i + 1}_sr.png'), sr_np)
+            cv2.imwrite(os.path.join(samples_dir, f'sample_{i + 1}_hr.png'), gt_np)
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Temperature SR Training')
+
+    # Пути
+    parser.add_argument('--data_dir', type=str, default='./data',
+                        help='Path to data directory with NPZ files')
+    parser.add_argument('--output_dir', type=str, default='./experiments/temperature_sr',
+                        help='Path to save outputs')
+
+    # Параметры модели
+    parser.add_argument('--scale_factor', type=int, default=4,
+                        help='Super-resolution scale factor')
+    parser.add_argument('--patch_size', type=int, default=128,
+                        help='Training patch size')
+
+    # Параметры обучения
+    parser.add_argument('--batch_size', type=int, default=4,
+                        help='Batch size')
+    parser.add_argument('--num_epochs', type=int, default=100,
+                        help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=2e-4,
+                        help='Learning rate')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from checkpoint')
+
+    args = parser.parse_args()
+    main(args)

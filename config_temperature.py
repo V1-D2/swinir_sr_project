@@ -1,9 +1,9 @@
 # Конфигурация для обучения температурной Super-Resolution модели
 
 # Общие параметры
-name = 'TemperatureSR_SwinIR_ESRGAN_x8'
+name = 'TemperatureSR_SwinIR_x4'
 model_type = 'TemperatureSRModel'
-scale = 8
+scale = 4
 num_gpu = 1  # Количество GPU
 
 # Параметры данных
@@ -16,7 +16,7 @@ datasets = {
             'target_height': 2000,
             'target_width': 220
         },
-        'scale_factor': 8,
+        'scale_factor': 4,
         'batch_size': 16,
         'samples_per_file': 10000,  # Ограничение для управления памятью
         'num_worker': 4,
@@ -35,25 +35,20 @@ datasets = {
 # Параметры сети
 network_g = {
     'type': 'SwinIR',
-    'upscale': 8,
+    'upscale': 4,
     'in_chans': 1,  # Температурные данные - 1 канал
     'img_size': 64,
     'window_size': 8,
     'img_range': 1.,
-    'depths': [6, 6, 6, 6, 6, 6],
+    'depths': [6, 6, 6, 6, 6, 6, 6, 6],
     'embed_dim': 180,
-    'num_heads': [6, 6, 6, 6, 6, 6],
+    'num_heads': [8, 8, 8, 8, 8, 8, 8, 8],
     'mlp_ratio': 2,
     'upsampler': 'pixelshuffle',
-    'resi_connection': '1conv'
+    'resi_connection': '3conv'
 }
 
-network_d = {
-    'type': 'UNetDiscriminatorSN',
-    'num_in_ch': 1,  # Температурные данные - 1 канал
-    'num_feat': 64,
-    'skip_connection': True
-}
+network_d = None
 
 # Путь к файлам
 path = {
@@ -73,13 +68,7 @@ train = {
     'ema_decay': 0.999,
     'optim_g': {
         'type': 'Adam',
-        'lr': 1e-4,
-        'weight_decay': 0,
-        'betas': [0.9, 0.99]
-    },
-    'optim_d': {
-        'type': 'Adam',
-        'lr': 1e-5,
+        'lr': 2e-4,
         'weight_decay': 0,
         'betas': [0.9, 0.99]
     },
@@ -101,20 +90,10 @@ train = {
         'loss_weight': 0.1,
         'feature_weights': [0.1, 0.1, 1.0, 1.0]
     },
-    'gan_opt': {
-        'type': 'gan',
-        'gan_type': 'lsgan',
-        'real_label_val': 0.9,
-        'fake_label_val': 0.1,
-        'loss_weight': 0.1
-    },
-    # Параметры дискриминатора
-    'net_d_iters': 10,
-    'net_d_init_iters': 2000,
     # Частота сохранения
     'manual_seed': 10,
-    'use_grad_clip': False,
-    #'grad_clip_norm': 0.5,
+    'use_grad_clip': True,
+    'grad_clip_norm': 0.5,
     'use_ema': True                 # Exponential Moving Averag
 }
 

@@ -300,19 +300,19 @@ def save_sample_images(model, val_loader, epoch, output_dir, device, num_samples
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Temperature SR Training')
 
-    # Пути
-    parser.add_argument('--data_dir', type=str, default='./data',
+    # Paths
+    parser.add_argument('--data_dir', type=str, required=True,
                         help='Path to data directory with NPZ files')
     parser.add_argument('--output_dir', type=str, default='./experiments/temperature_sr',
                         help='Path to save outputs')
 
-    # Параметры модели
+    # Model parameters
     parser.add_argument('--scale_factor', type=int, default=4,
                         help='Super-resolution scale factor')
     parser.add_argument('--patch_size', type=int, default=128,
                         help='Training patch size')
 
-    # Параметры обучения
+    # Training parameters
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=100,
@@ -321,11 +321,6 @@ if __name__ == '__main__':
                         help='Learning rate')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from checkpoint')
-
-    # REMOVE THIS DUPLICATE LINE:
-    # parser.add_argument('--num_epochs', type=int, default=100,
-    #                     help='Number of epochs')
-
     parser.add_argument('--debug', action='store_true',
                         help='Debug mode')
     parser.add_argument('--launcher', type=str, default='none',

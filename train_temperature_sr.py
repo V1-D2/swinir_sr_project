@@ -163,8 +163,17 @@ def main(args):
     print(f"Using device: {device}")
 
     # Создаем датасеты
-    train_files = [os.path.join(args.data_dir, f'train_{i}.npz') for i in range(1, 5)]
-    val_file = os.path.join(args.data_dir, 'train_1.npz')  # Используем часть первого файла для валидации
+    # Get all NPZ files in the data directory
+    import glob
+    all_npz_files = glob.glob(os.path.join(args.data_dir, '*.npz'))
+    if not all_npz_files:
+        raise FileNotFoundError(f"No NPZ files found in {args.data_dir}")
+
+    print(f"Found {len(all_npz_files)} NPZ files: {[os.path.basename(f) for f in all_npz_files]}")
+
+    # Use most files for training, last one for validation
+    train_files = all_npz_files[:-1] if len(all_npz_files) > 1 else all_npz_files
+    val_file = all_npz_files[-1]
 
     print("Creating data loaders...")
     train_loader, val_loader = create_train_val_dataloaders(

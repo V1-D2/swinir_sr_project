@@ -68,7 +68,7 @@ apptainer exec --nv \
     --scale_factor 4 \
     --patch_size 128 \
     --batch_size 8 \
-    --num_epochs 110 \
+    --num_epochs 10 \
     --lr 2e-4
 
 echo "============================================"

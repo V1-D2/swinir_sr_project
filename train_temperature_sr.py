@@ -18,6 +18,7 @@ from data.data_loader import create_train_val_dataloaders
 from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
 from utils.logger import Logger
 from utils.common import AverageMeter, save_checkpoint, load_checkpoint
+from utils.temperature_loss import TemperatureAwareLoss, CharbonnierLoss
 
 
 def define_model(args):
@@ -56,11 +57,15 @@ def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, de
 
         # Forward pass
         sr = model(lq)
-        loss = criterion(sr, gt)
+        loss, loss_dict = criterion(sr, gt)
 
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
+
+        # Gradient clipping
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
 
         # Вычисляем метрики
@@ -84,7 +89,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, de
             ssim_val /= sr_np.shape[0]
 
         # Обновляем метрики
-        losses.update(loss.item(), lq.size(0))
+        losses.update(loss_dict['total_loss'], lq.size(0))
         psnrs.update(psnr_val, lq.size(0))
         ssims.update(ssim_val, lq.size(0))
 
@@ -194,7 +199,7 @@ def main(args):
     print(f"Trainable parameters: {trainable_params:,}")
 
     # Loss function и optimizer
-    criterion = nn.L1Loss()
+    criterion = TemperatureAwareLoss(alpha=1.0, beta=0.1, gamma=0.05)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
 
     # Learning rate scheduler

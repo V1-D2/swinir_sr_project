@@ -9,7 +9,7 @@ import gc
 import sys
 
 sys.path.append('..')
-from models.degradation_bsrgan import BSRGANDegradation
+from models.degradation_bsrgan import TemperatureDegradation
 
 
 class TemperatureDataset(Dataset):
@@ -24,8 +24,13 @@ class TemperatureDataset(Dataset):
         self.phase = phase
         self.max_samples = max_samples
 
+        if patch_size < 32:
+            raise ValueError(f"Patch size {patch_size} is too small. Minimum is 32.")
+        if patch_size % scale_factor != 0:
+            raise ValueError(f"Patch size {patch_size} must be divisible by scale factor {scale_factor}")
+
         # Инициализируем деградацию BSRGAN
-        self.degradation = BSRGANDegradation(scale_factor=scale_factor)
+        self.degradation = TemperatureDegradation(scale_factor=scale_factor)
 
         # Загружаем данные
         print(f"Loading {npz_file}...")
@@ -101,7 +106,7 @@ class TemperatureDataset(Dataset):
             # Для обучения - случайный кроп
             temp_hr_patch = self.random_crop(temp_hr, self.patch_size)
 
-            # Применяем BSRGAN деградацию
+            # Применяем деградацию (lq_patchsize should be patch_size for HR, it gets divided internally)
             temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan(temp_hr_patch,
                                                                                lq_patchsize=self.patch_size)
         else:
@@ -203,7 +208,7 @@ def create_train_val_dataloaders(train_files: List[str], val_file: str,
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=2,
         pin_memory=True

@@ -1,16 +1,13 @@
 # models/degradation_bsrgan.py
 """
-Адаптированная версия BSRGAN degradation из utils_blindsr.py
-для одноканальных температурных данных
+Temperature-specific degradation model inspired by BSRGAN
+Adapted for single-channel temperature data with physically plausible degradations
 """
 import numpy as np
-import torch
 import cv2
 import random
 from scipy import ndimage
-import scipy
 import scipy.stats as ss
-from scipy.linalg import orth
 from scipy.interpolate import interp2d
 from typing import Tuple, Optional
 
@@ -18,27 +15,18 @@ from typing import Tuple, Optional
 def modcrop_np(img, sf):
     '''
     Args:
-        img: numpy image, HxW or HxWxC
+        img: numpy image, HxW
         sf: scale factor
     Return:
         cropped image
     '''
     h, w = img.shape[:2]
     im = np.copy(img)
-    return im[:h - h % sf, :w - w % sf, ...]
+    return im[:h - h % sf, :w - w % sf]
 
 
 def anisotropic_Gaussian(ksize=15, theta=np.pi, l1=6, l2=6):
-    """ generate an anisotropic Gaussian kernel
-    Args:
-        ksize : e.g., 15, kernel size
-        theta : [0,  pi], rotation angle range
-        l1    : [0.1,50], scaling of eigenvalues
-        l2    : [0.1,l1], scaling of eigenvalues
-        If l1 = l2, will get an isotropic Gaussian kernel.
-    Returns:
-        k     : kernel
-    """
+    """Generate an anisotropic Gaussian kernel"""
     v = np.dot(np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]), np.array([1., 0.]))
     V = np.array([[v[0], v[1]], [v[1], -v[0]]])
     D = np.array([[l1, 0], [0, l2]])
@@ -66,29 +54,15 @@ def fspecial_gaussian(hsize, sigma):
     [x, y] = np.meshgrid(np.arange(-siz[1], siz[1] + 1), np.arange(-siz[0], siz[0] + 1))
     arg = -(x * x + y * y) / (2 * std * std)
     h = np.exp(arg)
-    h[h < scipy.finfo(float).eps * h.max()] = 0
+    h[h < np.finfo(float).eps * h.max()] = 0
     sumh = h.sum()
     if sumh != 0:
         h = h / sumh
     return h
 
 
-def fspecial(filter_type, *args, **kwargs):
-    '''
-    python code from:
-    https://github.com/ronaldosena/imagens-medicas-2/blob/40171a6c259edec7827a6693a93955de2bd39e76/Aulas/aula_2_-_uniform_filter/matlab_fspecial.py
-    '''
-    if filter_type == 'gaussian':
-        return fspecial_gaussian(*args, **kwargs)
-
-
 def shift_pixel(x, sf, upper_left=True):
-    """shift pixel for super-resolution with different scale factors
-    Args:
-        x: HxW
-        sf: scale factor
-        upper_left: shift direction
-    """
+    """Shift pixel for super-resolution with different scale factors"""
     h, w = x.shape[:2]
     shift = (sf - 1) * 0.5
     xv, yv = np.arange(0, w, 1.0), np.arange(0, h, 1.0)
@@ -102,218 +76,203 @@ def shift_pixel(x, sf, upper_left=True):
     x1 = np.clip(x1, 0, w - 1)
     y1 = np.clip(y1, 0, h - 1)
 
-    # Для 2D массива
+    # For 2D array
     x = interp2d(xv, yv, x)(x1, y1)
     return x
 
 
-def add_blur(img, sf=4):
-    """Добавление размытия для одноканального изображения"""
+def add_temperature_blur(img, sf=4):
+    """Add physically plausible blur for temperature data"""
     wd2 = 4.0 + sf
     wd = 2.0 + 0.2 * sf
 
-    if random.random() < 0.5:
-        l1 = wd2 * random.random()
-        l2 = wd2 * random.random()
-        k = anisotropic_Gaussian(ksize=2 * random.randint(2, 11) + 3, theta=random.random() * np.pi, l1=l1, l2=l2)
+    # Use more conservative blur for temperature data
+    blur_prob = random.random()
+
+    if blur_prob < 0.3:
+        # Isotropic Gaussian blur (thermal diffusion-like)
+        k = fspecial_gaussian(2 * random.randint(2, 8) + 3, wd * random.uniform(0.5, 1.0))
+    elif blur_prob < 0.6:
+        # Mild anisotropic blur (directional heat transfer)
+        l1 = wd2 * random.uniform(0.5, 1.0)
+        l2 = wd2 * random.uniform(0.5, 1.0)
+        k = anisotropic_Gaussian(ksize=2 * random.randint(2, 6) + 3,
+                                 theta=random.random() * np.pi, l1=l1, l2=l2)
     else:
-        k = fspecial('gaussian', 2 * random.randint(2, 11) + 3, wd * random.random())
+        # No blur
+        return img
 
-    # Для одноканального изображения
-    if img.ndim == 2:
-        img = ndimage.filters.convolve(img, k, mode='mirror')
-    else:
-        img = ndimage.filters.convolve(img, np.expand_dims(k, axis=2), mode='mirror')
-
-    return img
+    # Apply convolution
+    img_blurred = ndimage.filters.convolve(img, k, mode='mirror')
+    return img_blurred
 
 
-def add_resize(img, sf=4):
-    """Изменение размера для одноканального изображения"""
-    rnum = np.random.rand()
-    if rnum > 0.8:  # up
-        sf1 = random.uniform(1, 2)
-    elif rnum < 0.7:  # down
-        sf1 = random.uniform(0.5 / sf, 1)
-    else:
-        sf1 = 1.0
-
-    # Обрабатываем одноканальное изображение
-    if img.ndim == 2:
-        img = cv2.resize(img, (int(sf1 * img.shape[1]), int(sf1 * img.shape[0])),
-                         interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA]))
-    else:
-        img = cv2.resize(img, (int(sf1 * img.shape[1]), int(sf1 * img.shape[0])),
-                         interpolation=random.choice([1, 2, 3]))
-
-    img = np.clip(img, 0.0, 1.0)
-    return img
-
-
-def add_Gaussian_noise(img, noise_level1=2, noise_level2=25):
-    """Добавление Гауссова шума для одноканального изображения"""
+def add_temperature_noise(img, noise_level1=1, noise_level2=15):
+    """Add sensor-like noise appropriate for temperature measurements"""
+    # Lower noise levels for temperature data
     noise_level = random.randint(noise_level1, noise_level2)
 
-    # Для одноканального изображения всегда добавляем простой шум
-    if img.ndim == 2:
-        img += np.random.normal(0, noise_level / 255.0, img.shape).astype(np.float32)
-    else:
-        # Для многоканального оставляем оригинальную логику
-        rnum = np.random.rand()
-        if rnum > 0.6:  # add color Gaussian noise
-            img += np.random.normal(0, noise_level / 255.0, img.shape).astype(np.float32)
-        elif rnum < 0.4:  # add grayscale Gaussian noise
-            img += np.random.normal(0, noise_level / 255.0, (*img.shape[:2], 1)).astype(np.float32)
-        else:  # add  noise
-            L = noise_level2 / 255.
-            D = np.diag(np.random.rand(3))
-            U = orth(np.random.rand(3, 3))
-            conv = np.dot(np.dot(np.transpose(U), D), U)
-            img += np.random.multivariate_normal([0, 0, 0], np.abs(L ** 2 * conv), img.shape[:2]).astype(np.float32)
+    # Add Gaussian noise (sensor noise)
+    noise = np.random.normal(0, noise_level / 255.0, img.shape).astype(np.float32)
 
-    img = np.clip(img, 0.0, 1.0)
+    # Add slight spatially correlated noise (atmospheric effects)
+    if random.random() < 0.3:
+        # Create correlated noise by blurring white noise
+        corr_noise = np.random.normal(0, noise_level / 255.0, img.shape).astype(np.float32)
+        kernel = fspecial_gaussian(5, 1.0)
+        corr_noise = ndimage.filters.convolve(corr_noise, kernel, mode='mirror')
+        noise = noise * 0.7 + corr_noise * 0.3
+
+    img_noisy = img + noise
+    return np.clip(img_noisy, 0.0, 1.0)
+
+
+def add_temperature_quantization(img, bits=10):
+    """Add quantization noise (ADC effects in temperature sensors)"""
+    if random.random() < 0.3:  # 30% chance
+        levels = 2 ** bits
+        img_quantized = np.round(img * levels) / levels
+        return img_quantized
     return img
 
 
-def add_JPEG_noise(img):
-    """Добавление JPEG артефактов для одноканального изображения"""
-    quality_factor = random.randint(30, 95)
+def add_temperature_artifacts(img):
+    """Add measurement artifacts specific to temperature imaging"""
+    if random.random() < 0.2:  # 20% chance
+        # Simulate calibration drift (slow spatial variation)
+        h, w = img.shape
+        drift = np.random.normal(0, 0.02, (5, 5))
+        drift = cv2.resize(drift, (w, h), interpolation=cv2.INTER_CUBIC)
+        img = img + drift
 
-    if img.ndim == 2:
-        # Для одноканального изображения
-        img_uint8 = (img * 255).astype(np.uint8)
-        result, encimg = cv2.imencode('.jpg', img_uint8, [int(cv2.IMWRITE_JPEG_QUALITY), quality_factor])
-        img = cv2.imdecode(encimg, cv2.IMREAD_GRAYSCALE)
-        img = img.astype(np.float32) / 255.0
-    else:
-        # Оригинальная логика для RGB
-        img = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-        result, encimg = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), quality_factor])
-        img = cv2.imdecode(encimg, 1)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    if random.random() < 0.1:  # 10% chance
+        # Simulate bad pixels (dead/hot pixels)
+        num_bad_pixels = random.randint(1, 10)
+        h, w = img.shape
+        for _ in range(num_bad_pixels):
+            x, y = random.randint(0, w - 1), random.randint(0, h - 1)
+            if random.random() < 0.5:
+                img[y, x] = 0  # Dead pixel
+            else:
+                img[y, x] = 1  # Hot pixel
 
+    return np.clip(img, 0.0, 1.0)
+
+
+def add_shifted_downsampling(img, sf):
+    """Add pixel shift effect during downsampling"""
+    if random.random() < 0.5:
+        # Apply sub-pixel shift before downsampling
+        k = fspecial_gaussian(25, random.uniform(0.1, 0.6 * sf))
+        k_shifted = shift_pixel(k, sf)
+        k_shifted = k_shifted / k_shifted.sum()
+        img = ndimage.filters.convolve(img, k_shifted, mode='mirror')
     return img
 
 
 def random_crop(lq, hq, sf=4, lq_patchsize=64):
-    """Случайная обрезка патчей"""
-    h, w = lq.shape[:2]
+    """Random crop for training patches"""
+    h, w = lq.shape
     rnd_h = random.randint(0, h - lq_patchsize)
     rnd_w = random.randint(0, w - lq_patchsize)
 
-    if lq.ndim == 2:
-        lq = lq[rnd_h:rnd_h + lq_patchsize, rnd_w:rnd_w + lq_patchsize]
-    else:
-        lq = lq[rnd_h:rnd_h + lq_patchsize, rnd_w:rnd_w + lq_patchsize, :]
+    lq = lq[rnd_h:rnd_h + lq_patchsize, rnd_w:rnd_w + lq_patchsize]
 
     rnd_h_H, rnd_w_H = int(rnd_h * sf), int(rnd_w * sf)
-    if hq.ndim == 2:
-        hq = hq[rnd_h_H:rnd_h_H + lq_patchsize * sf, rnd_w_H:rnd_w_H + lq_patchsize * sf]
-    else:
-        hq = hq[rnd_h_H:rnd_h_H + lq_patchsize * sf, rnd_w_H:rnd_w_H + lq_patchsize * sf, :]
+    hq = hq[rnd_h_H:rnd_h_H + lq_patchsize * sf, rnd_w_H:rnd_w_H + lq_patchsize * sf]
 
     return lq, hq
 
 
-def degradation_bsrgan(img, sf=4, lq_patchsize=72, isp_model=None):
+def degradation_bsrgan_temperature(img, sf=4, lq_patchsize=72):
     """
-    This is the degradation model of BSRGAN from the paper
-    "Designing a Practical Degradation Model for Deep Blind Image Super-Resolution"
-    Адаптировано для одноканальных изображений
-    ----------
-    img: HxW, [0, 1], its size should be large than (lq_patchsizexsf)x(lq_patchsizexsf)
-    sf: scale factor
-    isp_model: camera ISP model
+    Temperature-specific degradation model inspired by BSRGAN
+    WITHOUT any resizing - maintains strict size relationships
 
-    Returns
-    -------
-    img: low-quality patch, size: lq_patchsizeXlq_patchsize, range: [0, 1]
-    hq: corresponding high-quality patch, size: (lq_patchsizexsf)X(lq_patchsizexsf), range: [0, 1]
+    Args:
+        img: HxW temperature array, normalized to [0, 1]
+        sf: scale factor
+        lq_patchsize: size of low-quality patches
+
+    Returns:
+        lq: low-quality patch (lq_patchsize x lq_patchsize)
+        hq: high-quality patch (lq_patchsize*sf x lq_patchsize*sf)
     """
-    isp_prob, jpeg_prob, scale2_prob = 0.25, 0.9, 0.25
-    sf_ori = sf
+    # Probabilities for different degradations
+    noise_prob = 0.8
+    artifact_prob = 0.3
+    shift_prob = 0.5
 
-    h1, w1 = img.shape[:2]
-    img = img.copy()[:h1 - h1 % sf, :w1 - w1 % sf, ...]  # mod crop
-    h, w = img.shape[:2]
+    h1, w1 = img.shape
+    img = img.copy()[:h1 - h1 % sf, :w1 - w1 % sf]
+    h, w = img.shape
 
     if h < lq_patchsize * sf or w < lq_patchsize * sf:
-        raise ValueError(f'img size ({h1}X{w1}) is too small!')
+        raise ValueError(f'Image size ({h1}x{w1}) is too small for patch size {lq_patchsize} with scale factor {sf}!')
 
     hq = img.copy()
 
-    if sf == 4 and random.random() < scale2_prob:  # downsample1
-        if np.random.rand() < 0.5:
-            img = cv2.resize(img, (int(1 / 2 * img.shape[1]), int(1 / 2 * img.shape[0])),
-                             interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA]))
-        else:
-            # Для одноканальных данных используем cv2.resize вместо util.imresize_np
-            img = cv2.resize(img, (int(img.shape[1] / 2), int(img.shape[0] / 2)), interpolation=cv2.INTER_CUBIC)
-        img = np.clip(img, 0.0, 1.0)
-        sf = 2
+    # Apply degradations in random order (NO RESIZING)
+    degradations = []
 
-    shuffle_order = random.sample(range(7), 7)
-    idx1, idx2 = shuffle_order.index(2), shuffle_order.index(3)
-    if idx1 > idx2:  # keep downsample3 last
-        shuffle_order[idx1], shuffle_order[idx2] = shuffle_order[idx2], shuffle_order[idx1]
+    # Always include at least one blur
+    degradations.append('blur1')
 
-    for i in shuffle_order:
-        if i == 0:
-            img = add_blur(img, sf=sf)
-        elif i == 1:
-            img = add_blur(img, sf=sf)
-        elif i == 2:
-            a, b = img.shape[1], img.shape[0]
-            # downsample2
-            if random.random() < 0.75:
-                sf1 = random.uniform(1, 2 * sf)
-                img = cv2.resize(img, (int(1 / sf1 * img.shape[1]), int(1 / sf1 * img.shape[0])),
-                                 interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA]))
-            else:
-                k = fspecial('gaussian', 25, random.uniform(0.1, 0.6 * sf))
-                k_shifted = shift_pixel(k, sf)
-                k_shifted = k_shifted / k_shifted.sum()  # blur with shifted kernel
-                # Для одноканального изображения
-                if img.ndim == 2:
-                    img = ndimage.filters.convolve(img, k_shifted, mode='mirror')
-                else:
-                    img = ndimage.filters.convolve(img, np.expand_dims(k_shifted, axis=2), mode='mirror')
-                img = img[0::sf, 0::sf, ...]  # nearest downsampling
-            img = np.clip(img, 0.0, 1.0)
-        elif i == 3:
-            # downsample3
-            img = cv2.resize(img, (int(1 / sf * a), int(1 / sf * b)),
-                             interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA]))
-            img = np.clip(img, 0.0, 1.0)
-        elif i == 4:
-            # add Gaussian noise
-            img = add_Gaussian_noise(img, noise_level1=2, noise_level2=25)
-        elif i == 5:
-            # add JPEG noise
-            if random.random() < jpeg_prob:
-                img = add_JPEG_noise(img)
-        elif i == 6:
-            # add processed camera sensor noise
-            if random.random() < isp_prob and isp_model is not None:
-                with torch.no_grad():
-                    img, hq = isp_model.forward(img.copy(), hq)
+    # Randomly add other degradations
+    if random.random() < 0.5:
+        degradations.append('blur2')
+    if random.random() < noise_prob:
+        degradations.append('noise')
+    if random.random() < artifact_prob:
+        degradations.append('artifacts')
+    if random.random() < shift_prob:
+        degradations.append('shift')
 
-    # add final JPEG compression noise
-    img = add_JPEG_noise(img)
+    # Shuffle degradations
+    random.shuffle(degradations)
 
-    # random crop
-    img, hq = random_crop(img, hq, sf_ori, lq_patchsize)
+    # Apply degradations
+    for degradation in degradations:
+        if degradation == 'blur1':
+            img = add_temperature_blur(img, sf=sf)
+        elif degradation == 'blur2':
+            img = add_temperature_blur(img, sf=sf)
+        elif degradation == 'noise':
+            img = add_temperature_noise(img)
+        elif degradation == 'artifacts':
+            img = add_temperature_artifacts(img)
+        elif degradation == 'shift':
+            img = add_shifted_downsampling(img, sf)
+
+    # Add quantization
+    img = add_temperature_quantization(img)
+
+    # Final downsampling with EXACT scale factor (no intermediate resizing)
+    h_lq, w_lq = h // sf, w // sf
+
+    # Choose downsampling method
+    if random.random() < 0.5:
+        # Standard area interpolation
+        img = cv2.resize(img, (w_lq, h_lq), interpolation=cv2.INTER_AREA)
+    else:
+        # Nearest neighbor downsampling (simulates direct subsampling)
+        img = img[::sf, ::sf]
+
+    # Ensure output is properly clipped
+    img = np.clip(img, 0.0, 1.0)
+
+    # Random crop to get exact patch sizes
+    img, hq = random_crop(img, hq, sf, lq_patchsize)
 
     return img, hq
 
 
-class BSRGANDegradation:
-    """Обертка для совместимости с data loader"""
+class TemperatureDegradation:
+    """Wrapper class for temperature-specific degradation"""
 
-    def __init__(self, scale_factor=4, use_sharp=False):
+    def __init__(self, scale_factor=4):
         self.scale_factor = scale_factor
-        self.use_sharp = use_sharp
 
     def degradation_bsrgan(self, img, lq_patchsize=128):
-        """Вызов функции деградации"""
-        return degradation_bsrgan(img, sf=self.scale_factor, lq_patchsize=lq_patchsize)
+        """Apply temperature-specific degradation"""
+        return degradation_bsrgan_temperature(img, sf=self.scale_factor, lq_patchsize=lq_patchsize // self.scale_factor)

@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from models.network_swinir import SwinIR
 from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
 from data.data_loader import TemperatureDataset
+import torch.nn.functional as F
 
 
 def parse_args():

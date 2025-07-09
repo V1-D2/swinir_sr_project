@@ -321,6 +321,14 @@ if __name__ == '__main__':
                         help='Learning rate')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from checkpoint')
+    # Если есть эти аргументы в вашей версии, добавьте их тоже:
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode')
+    parser.add_argument('--launcher', type=str, default='none',
+                        choices=['none', 'pytorch'],
+                        help='Launcher type')
+    parser.add_argument('--local_rank', type=int, default=0,
+                        help='Local rank for distributed training')
 
     args = parser.parse_args()
     main(args)

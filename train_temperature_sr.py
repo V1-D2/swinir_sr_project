@@ -321,6 +321,11 @@ if __name__ == '__main__':
                         help='Learning rate')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from checkpoint')
+
+    # Add these missing arguments:
+    parser.add_argument('--num_epochs', type=int, default=100,
+                        help='Number of epochs')
+
     # Если есть эти аргументы в вашей версии, добавьте их тоже:
     parser.add_argument('--debug', action='store_true',
                         help='Debug mode')

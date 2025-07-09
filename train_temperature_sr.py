@@ -124,7 +124,7 @@ def validate(model, val_loader, criterion, epoch, logger, device):
 
             # Forward pass
             sr = model(lq)
-            loss = criterion(sr, gt)
+            loss, loss_dict = criterion(sr, gt)
 
             # Метрики
             sr_np = sr.cpu().numpy()

@@ -55,9 +55,11 @@ echo "============================================"
 echo "Starting Temperature SwinIR SR training..."
 
 # Run training
+# Run training
 apptainer exec --nv \
     --bind $HOME/local-python:$HOME/.local \
-    --bind $HOME/temperature_sr_project:$HOME/swinir_sr_project \
+    --bind $HOME/swinir_sr_project:$HOME/swinir_sr_project \
+    --bind $HOME/temperature_sr_project/data:$HOME/temperature_sr_project/data \
     --env PYTHONPATH=$HOME/swinir_sr_project:$PYTHONPATH \
     /home/shared/containers/tensorflow-25.02-py3.sif \
     python train_temperature_sr.py \

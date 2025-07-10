@@ -66,10 +66,10 @@ apptainer exec --nv \
     --data_dir $HOME/temperature_sr_project/data \
     --output_dir ./experiments/temperature_swinir_x4 \
     --scale_factor 4 \
-    --patch_size 128 \
-    --batch_size 8 \
-    --num_epochs 10 \
-    --lr 2e-4
+    --patch_size 160 \
+    --batch_size 16 \
+    --num_epochs 40 \
+    --lr 3e-4
 
 echo "============================================"
 echo "Temperature SwinIR Training Job Finished: $(date)"

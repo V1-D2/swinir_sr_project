@@ -89,10 +89,10 @@ def add_temperature_blur(img, sf=4):
     # Use more conservative blur for temperature data
     blur_prob = random.random()
 
-    if blur_prob < 0.3:
+    if blur_prob < 0.4:
         # Isotropic Gaussian blur (thermal diffusion-like)
-        k = fspecial_gaussian(2 * random.randint(2, 8) + 3, wd * random.uniform(0.5, 1.0))
-    elif blur_prob < 0.6:
+        k = fspecial_gaussian(2 * random.randint(3, 10) + 3, wd * random.uniform(0.7, 1.2))
+    elif blur_prob < 0.7:
         # Mild anisotropic blur (directional heat transfer)
         l1 = wd2 * random.uniform(0.5, 1.0)
         l2 = wd2 * random.uniform(0.5, 1.0)
@@ -107,7 +107,7 @@ def add_temperature_blur(img, sf=4):
     return img_blurred
 
 
-def add_temperature_noise(img, noise_level1=1, noise_level2=15):
+def add_temperature_noise(img, noise_level1=1, noise_level2=25):
     """Add sensor-like noise appropriate for temperature measurements"""
     # Lower noise levels for temperature data
     noise_level = random.randint(noise_level1, noise_level2)
@@ -138,10 +138,10 @@ def add_temperature_quantization(img, bits=10):
 
 def add_temperature_artifacts(img):
     """Add measurement artifacts specific to temperature imaging"""
-    if random.random() < 0.2:  # 20% chance
+    if random.random() < 0.3:  # 20% chance
         # Simulate calibration drift (slow spatial variation)
         h, w = img.shape
-        drift = np.random.normal(0, 0.02, (5, 5))
+        drift = np.random.normal(0, 0.03, (5, 5))
         drift = cv2.resize(drift, (w, h), interpolation=cv2.INTER_CUBIC)
         img = img + drift
 
@@ -199,7 +199,7 @@ def degradation_bsrgan_temperature(img, sf=4, lq_patchsize=72):
         hq: high-quality patch (lq_patchsize*sf x lq_patchsize*sf)
     """
     # Probabilities for different degradations
-    noise_prob = 0.8
+    noise_prob = 0.9
     artifact_prob = 0.3
     shift_prob = 0.5
 

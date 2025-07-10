@@ -29,12 +29,12 @@ def define_model(args):
         img_size=args.patch_size,
         window_size=8,
         img_range=1.,
-        depths=[6, 6, 6, 6, 6, 6],
-        embed_dim=180,
-        num_heads=[6, 6, 6, 6, 6, 6],
+        depths=[8, 8, 8, 8, 8, 8, 8, 8],
+        embed_dim=240,
+        num_heads=[8, 8, 8, 8, 8, 8, 8, 8],
         mlp_ratio=2,
         upsampler='nearest+conv',
-        resi_connection='1conv'
+        resi_connection='3conv'
     )
     return model
 
@@ -199,7 +199,7 @@ def main(args):
     print(f"Trainable parameters: {trainable_params:,}")
 
     # Loss function и optimizer
-    criterion = TemperatureAwareLoss(alpha=1.0, beta=0.1, gamma=0.05)
+    criterion = TemperatureAwareLoss(alpha=1.0, beta=0.3, gamma=0.15)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
 
     # Learning rate scheduler

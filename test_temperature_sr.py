@@ -49,12 +49,12 @@ def define_model(args):
         img_size=args.patch_size,
         window_size=args.window_size,
         img_range=1.,
-        depths=[6, 6, 6, 6, 6, 6],
-        embed_dim=180,
-        num_heads=[6, 6, 6, 6, 6, 6],
+        depths=[8, 8, 8, 8, 8, 8, 8, 8],
+        embed_dim=240,
+        num_heads=[8, 8, 8, 8, 8, 8, 8, 8],
         mlp_ratio=2,
         upsampler='nearest+conv',
-        resi_connection='1conv'
+        resi_connection='3conv'
     )
     return model
 
@@ -206,7 +206,7 @@ def main():
     model = define_model(args).to(device)
 
     # Загружаем checkpoint
-    checkpoint = torch.load(args.model_path, map_location=device)
+    checkpoint = torch.load(args.model_path, map_location=device,  weights_only=False)
 
     # Debug: print checkpoint keys
     if isinstance(checkpoint, dict):

@@ -215,7 +215,7 @@ def main():
     # Загружаем веса модели
     if isinstance(checkpoint, dict):
         if 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'], strict=True)
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
         elif 'params' in checkpoint:
             model.load_state_dict(checkpoint['params'], strict=True)
         elif 'model' in checkpoint:

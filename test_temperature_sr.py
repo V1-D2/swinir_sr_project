@@ -34,7 +34,7 @@ def parse_args():
                         help='Save comparison plots')
     parser.add_argument('--scale_factor', type=int, default=4,
                         help='Super-resolution scale factor')
-    parser.add_argument('--patch_size', type=int, default=128,
+    parser.add_argument('--patch_size', type=int, default=160,
                         help='Patch size used in training')
     parser.add_argument('--window_size', type=int, default=8,
                         help='Window size for SwinIR')

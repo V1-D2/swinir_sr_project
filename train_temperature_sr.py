@@ -23,10 +23,15 @@ from utils.temperature_loss import TemperatureAwareLoss, CharbonnierLoss
 
 def define_model(args):
     """Определение модели SwinIR для температурных данных"""
+    if args.patch_height is not None and args.patch_width is not None:
+        img_size = (args.patch_height, args.patch_width)
+    else:
+        img_size = args.patch_size
+
     model = SwinIR(
         upscale=args.scale_factor,
         in_chans=1,  # Одноканальные данные
-        img_size=args.patch_size,
+        img_size=img_size,
         window_size=8,
         img_range=1.,
         depths=[8, 8, 8, 8, 8, 8, 8, 8],
@@ -185,7 +190,9 @@ def main(args):
         train_files, val_file,
         batch_size=args.batch_size,
         scale_factor=args.scale_factor,
-        patch_size=args.patch_size
+        patch_size=args.patch_size,
+        patch_height=args.patch_height,
+        patch_width=args.patch_width
     )
 
     # Создаем модель
@@ -325,6 +332,10 @@ if __name__ == '__main__':
                         help='Super-resolution scale factor')
     parser.add_argument('--patch_size', type=int, default=128,
                         help='Training patch size')
+    parser.add_argument('--patch_height', type=int, default=800,
+                        help='Training patch height (defaults to patch_size if not set)')
+    parser.add_argument('--patch_width', type=int, default=200,
+                        help='Training patch width (defaults to patch_size if not set)')
 
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=4,

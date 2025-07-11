@@ -17,12 +17,20 @@ class TemperatureDataset(Dataset):
 
     def __init__(self, npz_file: str, scale_factor: int = 4,
                  patch_size: int = 128, max_samples: Optional[int] = None,
-                 phase: str = 'train'):
+                 phase: str = 'train', patch_height: int = 800, patch_width: int = 200):
         self.npz_file = npz_file
         self.scale_factor = scale_factor
         self.patch_size = patch_size
         self.phase = phase
         self.max_samples = max_samples
+
+        if patch_height is not None and patch_width is not None:
+            self.patch_height = patch_height
+            self.patch_width = patch_width
+        else:
+            self.patch_height = patch_size
+            self.patch_width = patch_size
+
 
         if patch_size < 32:
             raise ValueError(f"Patch size {patch_size} is too small. Minimum is 32.")
@@ -97,6 +105,21 @@ class TemperatureDataset(Dataset):
 
         return img[top:top + patch_size, left:left + patch_size]
 
+    def random_crop_rect(self, img: np.ndarray, patch_height: int, patch_width: int) -> np.ndarray:
+        """Random crop of rectangular patch from image"""
+        h, w = img.shape
+        if h < patch_height or w < patch_width:
+            # Padding logic - adjust for both dimensions
+            pad_h = max(0, patch_height - h)
+            pad_w = max(0, patch_width - w)
+            img = np.pad(img, ((0, pad_h), (0, pad_w)), mode='reflect')
+            h, w = img.shape
+
+        top = np.random.randint(0, h - patch_height + 1)
+        left = np.random.randint(0, w - patch_width + 1)
+
+        return img[top:top + patch_height, left:left + patch_width]
+
     def __getitem__(self, idx):
         # Получаем температурный массив
         temp_hr = self.temperatures[idx]
@@ -104,11 +127,14 @@ class TemperatureDataset(Dataset):
 
         if self.phase == 'train':
             # Для обучения - случайный кроп
-            temp_hr_patch = self.random_crop(temp_hr, self.patch_size)
+            temp_hr_patch = self.random_crop_rect(temp_hr, self.patch_height, self.patch_width)
 
             # Применяем деградацию (lq_patchsize should be patch_size for HR, it gets divided internally)
-            temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan(temp_hr_patch,
-                                                                               lq_patchsize=self.patch_size)
+            temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
+                temp_hr_patch,
+                lq_patchsize_h=self.patch_height // self.scale_factor,
+                lq_patchsize_w=self.patch_width // self.scale_factor
+            )
         else:
             # Для валидации - центральный кроп или весь массив
             h, w = temp_hr.shape
@@ -147,7 +173,8 @@ class MultiFileDataLoader:
 
     def __init__(self, npz_files: List[str], batch_size: int = 4,
                  scale_factor: int = 4, patch_size: int = 128,
-                 samples_per_file: Optional[int] = None, phase: str = 'train'):
+                 samples_per_file: Optional[int] = None, phase: str = 'train',
+                 patch_height: int = None, patch_width: int = None):
         self.npz_files = npz_files
         self.batch_size = batch_size
         self.scale_factor = scale_factor
@@ -155,6 +182,9 @@ class MultiFileDataLoader:
         self.samples_per_file = samples_per_file
         self.phase = phase
         self.current_file_idx = 0
+
+        self.patch_height = patch_height
+        self.patch_width = patch_width
 
     def get_combined_dataloader(self) -> DataLoader:
         """Создает единый DataLoader для всех файлов"""
@@ -166,7 +196,9 @@ class MultiFileDataLoader:
                 scale_factor=self.scale_factor,
                 patch_size=self.patch_size,
                 max_samples=self.samples_per_file,
-                phase=self.phase
+                phase=self.phase,
+                patch_height=self.patch_height,
+                patch_width=self.patch_width
             )
             all_datasets.append(dataset)
 
@@ -185,7 +217,8 @@ class MultiFileDataLoader:
 
 def create_train_val_dataloaders(train_files: List[str], val_file: str,
                                  batch_size: int = 4, scale_factor: int = 4,
-                                 patch_size: int = 128) -> Tuple[DataLoader, DataLoader]:
+                                 patch_size: int = 128, patch_height: int = None,
+                                 patch_width: int = None) -> Tuple[DataLoader, DataLoader]:
     """Создание train и validation датлоадеров"""
 
     # Training dataloader
@@ -194,7 +227,9 @@ def create_train_val_dataloaders(train_files: List[str], val_file: str,
         batch_size=batch_size,
         scale_factor=scale_factor,
         patch_size=patch_size,
-        phase='train'
+        phase='train',
+        patch_height=patch_height,
+        patch_width=patch_width
     ).get_combined_dataloader()
 
     # Validation dataloader
@@ -203,7 +238,9 @@ def create_train_val_dataloaders(train_files: List[str], val_file: str,
         scale_factor=scale_factor,
         patch_size=patch_size,
         max_samples=100,  # Используем только 100 примеров для валидации
-        phase='val'
+        phase='val',
+        patch_height=patch_height,
+        patch_width=patch_width
     )
 
     val_loader = DataLoader(

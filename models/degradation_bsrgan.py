@@ -184,6 +184,104 @@ def random_crop(lq, hq, sf=4, lq_patchsize=64):
     return lq, hq
 
 
+def random_crop_rect(lq, hq, sf=4, lq_patchsize_h=64, lq_patchsize_w=64):
+    """Random crop for rectangular patches"""
+    h, w = lq.shape
+    rnd_h = random.randint(0, h - lq_patchsize_h)
+    rnd_w = random.randint(0, w - lq_patchsize_w)
+
+    lq = lq[rnd_h:rnd_h + lq_patchsize_h, rnd_w:rnd_w + lq_patchsize_w]
+
+    rnd_h_H, rnd_w_H = int(rnd_h * sf), int(rnd_w * sf)
+    hq = hq[rnd_h_H:rnd_h_H + lq_patchsize_h * sf, rnd_w_H:rnd_w_H + lq_patchsize_w * sf]
+
+    return lq, hq
+
+
+def degradation_bsrgan_temperature_rect(img, sf=4, lq_patchsize_h=72, lq_patchsize_w=72):
+    """
+    Temperature-specific degradation model for RECTANGULAR patches
+
+    Args:
+        img: HxW temperature array, normalized to [0, 1]
+        sf: scale factor
+        lq_patchsize_h: height of low-quality patches
+        lq_patchsize_w: width of low-quality patches
+
+    Returns:
+        lq: low-quality patch (lq_patchsize_h x lq_patchsize_w)
+        hq: high-quality patch (lq_patchsize_h*sf x lq_patchsize_w*sf)
+    """
+    # Probabilities for different degradations
+    noise_prob = 0.9
+    artifact_prob = 0.3
+    shift_prob = 0.5
+
+    h1, w1 = img.shape
+    img = img.copy()[:h1 - h1 % sf, :w1 - w1 % sf]
+    h, w = img.shape
+
+    if h < lq_patchsize_h * sf or w < lq_patchsize_w * sf:
+        raise ValueError(
+            f'Image size ({h1}x{w1}) is too small for patch size {lq_patchsize_h}x{lq_patchsize_w} with scale factor {sf}!')
+
+    hq = img.copy()
+
+    # Apply degradations in random order
+    degradations = []
+
+    # Always include at least one blur
+    degradations.append('blur1')
+
+    # Randomly add other degradations
+    if random.random() < 0.5:
+        degradations.append('blur2')
+    if random.random() < noise_prob:
+        degradations.append('noise')
+    if random.random() < artifact_prob:
+        degradations.append('artifacts')
+    if random.random() < shift_prob:
+        degradations.append('shift')
+
+    # Shuffle degradations
+    random.shuffle(degradations)
+
+    # Apply degradations
+    for degradation in degradations:
+        if degradation == 'blur1':
+            img = add_temperature_blur(img, sf=sf)
+        elif degradation == 'blur2':
+            img = add_temperature_blur(img, sf=sf)
+        elif degradation == 'noise':
+            img = add_temperature_noise(img)
+        elif degradation == 'artifacts':
+            img = add_temperature_artifacts(img)
+        elif degradation == 'shift':
+            img = add_shifted_downsampling(img, sf)
+
+    # Add quantization
+    img = add_temperature_quantization(img)
+
+    # Final downsampling
+    h_lq, w_lq = h // sf, w // sf
+
+    # Choose downsampling method
+    if random.random() < 0.5:
+        # Standard area interpolation
+        img = cv2.resize(img, (w_lq, h_lq), interpolation=cv2.INTER_AREA)
+    else:
+        # Nearest neighbor downsampling
+        img = img[::sf, ::sf]
+
+    # Ensure output is properly clipped
+    img = np.clip(img, 0.0, 1.0)
+
+    # Random crop to get exact patch sizes
+    img, hq = random_crop_rect(img, hq, sf, lq_patchsize_h, lq_patchsize_w)
+
+    return img, hq
+
+
 def degradation_bsrgan_temperature(img, sf=4, lq_patchsize=72):
     """
     Temperature-specific degradation model inspired by BSRGAN
@@ -276,3 +374,9 @@ class TemperatureDegradation:
     def degradation_bsrgan(self, img, lq_patchsize=128):
         """Apply temperature-specific degradation"""
         return degradation_bsrgan_temperature(img, sf=self.scale_factor, lq_patchsize=lq_patchsize // self.scale_factor)
+
+    def degradation_bsrgan_rect(self, img, lq_patchsize_h=32, lq_patchsize_w=32):
+        """Apply temperature-specific degradation for rectangular patches"""
+        return degradation_bsrgan_temperature_rect(img, sf=self.scale_factor,
+                                                   lq_patchsize_h=lq_patchsize_h,
+                                                   lq_patchsize_w=lq_patchsize_w)

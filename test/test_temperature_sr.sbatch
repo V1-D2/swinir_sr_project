@@ -28,7 +28,7 @@ apptainer exec --nv \
     --env PYTHONPATH=$HOME/swinir_sr_project:$PYTHONPATH \
     /home/shared/containers/tensorflow-25.02-py3.sif \
     python test_temperature_sr.py \
-    --model_path ./experiments/temperature_swinir_x4/checkpoints/best.pth \
+    --model_path ./experiments/temperature_swinir_rect/checkpoints/best.pth \
     --input_npz ./test/single_amsr2_image.npz \
     --output_dir ./test_results \
     --num_samples 1 \

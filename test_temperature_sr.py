@@ -16,8 +16,9 @@ import matplotlib.pyplot as plt
 
 from models.network_swinir import SwinIR
 from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
-from data.data_loader import TemperatureDataset
 import torch.nn.functional as F
+
+
 
 
 def parse_args():
@@ -233,9 +234,6 @@ def main():
     # Загружаем тестовые данные
     print(f"Loading test data from {args.input_npz}")
 
-    # Используем TemperatureDataset для загрузки данных
-    from data_preprocessing import TemperatureDataPreprocessor
-    preprocessor = TemperatureDataPreprocessor()
 
     # Загружаем данные напрямую
     data = np.load(args.input_npz, allow_pickle=True)
@@ -269,9 +267,6 @@ def main():
         temp = swath['temperature'].astype(np.float32)
         meta = swath.get('metadata', {})
 
-        # Предобработка
-        temp = preprocessor.crop_or_pad(temp)
-
         # Убеждаемся, что размеры кратны scale_factor
         h, w = temp.shape
         h = h - h % args.scale_factor
@@ -279,7 +274,10 @@ def main():
         temp = temp[:h, :w]
 
         temp_min, temp_max = np.min(temp), np.max(temp)
-        temp_norm = preprocessor.normalize_temperature(temp)
+        if temp_max > temp_min:
+            temp_norm = (temp - temp_min) / (temp_max - temp_min)
+        else:
+            temp_norm = np.zeros_like(temp)
 
         # Создаем LR версию простым даунсэмплингом для тестирования
         lr = cv2.resize(temp_norm, (w // args.scale_factor, h // args.scale_factor),

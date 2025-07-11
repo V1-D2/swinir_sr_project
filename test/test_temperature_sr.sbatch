@@ -29,7 +29,7 @@ apptainer exec --nv \
     /home/shared/containers/tensorflow-25.02-py3.sif \
     python test_temperature_sr.py \
     --model_path ./experiments/temperature_swinir_x4/checkpoints/best.pth \
-    --input_npz ./data/test_sample.npz \
+    --input_npz ./test/single_amsr2_image.npz \
     --output_dir ./test_results \
     --num_samples 1 \
     --save_comparison \

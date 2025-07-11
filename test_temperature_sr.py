@@ -84,6 +84,10 @@ def test_model(model, test_data, device):
         sr_tensor = sr_tensor[..., :h_old * test_data['scale_factor'], :w_old * test_data['scale_factor']]
         sr_tensor = torch.clamp(sr_tensor, 0, 1)
 
+        print(f"\nDEBUG: После прохода через модель")
+        print(f"  SR tensor диапазон (до clamp): [{sr_tensor.min().item():.6f}, {sr_tensor.max().item():.6f}]")
+        print(f"  Есть ли NaN в SR: {torch.isnan(sr_tensor).any().item()}")
+
     # Конвертация в numpy
     lr_img = lr_tensor[0, 0, :h_old, :w_old].cpu().numpy()
     hr_img = hr_tensor[0, 0].cpu().numpy()
@@ -97,6 +101,23 @@ def test_model(model, test_data, device):
             hr_img = hr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
             sr_img = sr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
             lr_img = lr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
+
+            # DEBUG: После денормализации
+            print(f"\nDEBUG: После денормализации к физическим единицам")
+            print(
+                f"  Метаданные - original_min: {meta.get('original_min', 'НЕТ')}, original_max: {meta.get('original_max', 'НЕТ')}")
+            print(f"  HR диапазон: [{np.min(hr_img):.2f}, {np.max(hr_img):.2f}]")
+            print(f"  SR диапазон: [{np.min(sr_img):.2f}, {np.max(sr_img):.2f}]")
+            print(f"  LR диапазон: [{np.min(lr_img):.2f}, {np.max(lr_img):.2f}]")
+
+            # Найдем где максимальная ошибка
+            diff = np.abs(sr_img - hr_img)
+            max_error_idx = np.unravel_index(np.argmax(diff), diff.shape)
+            print(f"\nDEBUG: Максимальная ошибка")
+            print(f"  Позиция: {max_error_idx}")
+            print(f"  HR значение в этой точке: {hr_img[max_error_idx]:.2f}")
+            print(f"  SR значение в этой точке: {sr_img[max_error_idx]:.2f}")
+            print(f"  Разница: {diff[max_error_idx]:.2f}")
 
     results = {
         'lr': lr_img,
@@ -252,8 +273,24 @@ def main():
         swaths = data['swaths']
     elif 'swath_array' in data:
         swaths = data['swath_array']
+
+        test = swaths[1]
+        temp_test = test['temperature'].astype(np.float32)
+        temp_test = test['metadata']
+
+        print(f"\nDEBUG: Проверка формата данных NPZ")
+        print(
+            f"  Тип temperature: {type(temp_test)}, shape: {temp_test.shape if hasattr(temp_test, 'shape') else 'нет shape'}")
+        print(f"  Тип metadata: {type(temp_test)}")
+        if isinstance(temp_test, dict):
+            print(f"  Ключи metadata: {list(temp_test.keys())}")
+        print(
+            f"  Пример температур (первые 10): {temp_test.flat[:10] if hasattr(temp_test, 'flat') else 'не могу показать'}")
+
     else:
         raise ValueError("Cannot find temperature data in the NPZ file")
+
+
 
     # Ограничиваем количество тестовых образцов
     num_samples = min(args.num_samples, len(swaths))
@@ -265,7 +302,17 @@ def main():
     for i in tqdm(range(num_samples), desc="Testing"):
         swath = swaths[i]
         temp = swath['temperature'].astype(np.float32)
+        #temp = temp * swath['metadata']['scale_factor']
         meta = swath.get('metadata', {})
+
+        print(meta)
+        print(f"\n{'=' * 60}")
+        print(f"DEBUG Sample {i}: Исходные данные")
+        print(f"  Размер температуры: {temp.shape}")
+        print(f"  Диапазон температур ДО нормализации: [{np.min(temp):.2f}, {np.max(temp):.2f}]")
+        print(f"  Есть ли NaN: {np.isnan(temp).any()}")
+        print(f"  Есть ли Inf: {np.isinf(temp).any()}")
+        print(f"  Среднее: {np.mean(temp):.2f}, Std: {np.std(temp):.2f}")
 
         # Убеждаемся, что размеры кратны scale_factor
         h, w = temp.shape
@@ -278,6 +325,12 @@ def main():
             temp_norm = (temp - temp_min) / (temp_max - temp_min)
         else:
             temp_norm = np.zeros_like(temp)
+
+        # DEBUG: После нормализации
+        print(f"\nDEBUG: После нормализации")
+        print(f"  temp_min: {temp_min:.6f}, temp_max: {temp_max:.6f}")
+        print(f"  Диапазон нормализованных: [{np.min(temp_norm):.6f}, {np.max(temp_norm):.6f}]")
+        print(f"  Должен быть [0, 1]!")
 
         # Создаем LR версию простым даунсэмплингом для тестирования
         lr = cv2.resize(temp_norm, (w // args.scale_factor, h // args.scale_factor),

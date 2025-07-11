@@ -34,7 +34,7 @@ apptainer exec --nv \
     --num_samples 1 \
     --save_comparison \
     --scale_factor 4 \
-    --patch_size 128 \
+    --patch_size 160 \
     --window_size 8
 
 echo "============================================"

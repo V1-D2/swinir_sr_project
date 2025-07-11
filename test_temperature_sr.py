@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script for testing trained SwinIR temperature Super-Resolution model
+Скрипт для тестирования обученной SwinIR температурной Super-Resolution модели
 """
 
 import argparse
@@ -13,10 +13,11 @@ import matplotlib
 
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
-from collections import OrderedDict
 
 from models.network_swinir import SwinIR
 from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
+from data.data_loader import TemperatureDataset
+import torch.nn.functional as F
 
 
 def parse_args():
@@ -37,202 +38,127 @@ def parse_args():
                         help='Patch size used in training')
     parser.add_argument('--window_size', type=int, default=8,
                         help='Window size for SwinIR')
-    parser.add_argument('--tile_size', type=int, default=256,
-                        help='Tile size for processing large images')
-    parser.add_argument('--tile_overlap', type=int, default=32,
-                        help='Overlap between tiles')
     return parser.parse_args()
 
 
-def load_checkpoint_flexible(model, checkpoint_path, device):
-    """Load checkpoint with flexible state dict handling"""
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # Extract state dict from various checkpoint formats
-    if isinstance(checkpoint, dict):
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        elif 'params' in checkpoint:
-            state_dict = checkpoint['params']
-        elif 'model' in checkpoint:
-            state_dict = checkpoint['model']
-        else:
-            state_dict = checkpoint
-    else:
-        state_dict = checkpoint
-
-    # Get current model state dict
-    model_state_dict = model.state_dict()
-
-    # Create new state dict with matched keys
-    new_state_dict = OrderedDict()
-
-    for k, v in state_dict.items():
-        if k in model_state_dict:
-            if model_state_dict[k].shape == v.shape:
-                new_state_dict[k] = v
-            else:
-                print(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state_dict[k].shape}")
-                # Skip mismatched attention masks - they will be recalculated
-                if 'attn_mask' not in k:
-                    print(f"Warning: Unable to load {k} due to shape mismatch")
-        else:
-            print(f"Key {k} not found in model")
-
-    # Load the filtered state dict
-    model.load_state_dict(new_state_dict, strict=False)
-
-    print(f"Loaded {len(new_state_dict)}/{len(state_dict)} parameters from checkpoint")
-
-    # Return additional info if available
-    info = {}
-    if isinstance(checkpoint, dict):
-        info['epoch'] = checkpoint.get('epoch', 0)
-        info['best_psnr'] = checkpoint.get('best_psnr', 0)
-        info['args'] = checkpoint.get('args', None)
-
-    return info
+def define_model(args):
+    """Определение модели SwinIR для температурных данных"""
+    model = SwinIR(
+        upscale=args.scale_factor,
+        in_chans=1,  # Одноканальные данные
+        img_size=args.patch_size,
+        window_size=args.window_size,
+        img_range=1.,
+        depths=[8, 8, 8, 8, 8, 8, 8, 8],
+        embed_dim=240,
+        num_heads=[8, 8, 8, 8, 8, 8, 8, 8],
+        mlp_ratio=2,
+        upsampler='nearest+conv',
+        resi_connection='3conv'
+    )
+    return model
 
 
-def tile_process(model, img, scale, tile_size, tile_overlap, window_size):
-    """Process image in tiles to handle large images"""
-    batch, channel, height, width = img.shape
-    output_height = height * scale
-    output_width = width * scale
-
-    # Calculate output tile size
-    output_tile_size = tile_size * scale
-    output_overlap = tile_overlap * scale
-
-    # Initialize output
-    output = torch.zeros((batch, channel, output_height, output_width), device=img.device)
-
-    # Process each tile
-    tiles_x = int(np.ceil((width - tile_overlap) / (tile_size - tile_overlap)))
-    tiles_y = int(np.ceil((height - tile_overlap) / (tile_size - tile_overlap)))
-
-    for y in range(tiles_y):
-        for x in range(tiles_x):
-            # Calculate tile boundaries
-            ofs_x = x * (tile_size - tile_overlap)
-            ofs_y = y * (tile_size - tile_overlap)
-
-            # Ensure we don't go out of bounds
-            input_start_x = ofs_x
-            input_end_x = min(ofs_x + tile_size, width)
-            input_start_y = ofs_y
-            input_end_y = min(ofs_y + tile_size, height)
-
-            # Adjust tile size if at boundary
-            tile_width = input_end_x - input_start_x
-            tile_height = input_end_y - input_start_y
-
-            # Extract tile
-            input_tile = img[:, :, input_start_y:input_end_y, input_start_x:input_end_x]
-
-            # Pad tile to window_size if needed
-            _, _, h, w = input_tile.size()
-            h_pad = (h // window_size + 1) * window_size - h if h % window_size != 0 else 0
-            w_pad = (w // window_size + 1) * window_size - w if w % window_size != 0 else 0
-
-            if h_pad > 0 or w_pad > 0:
-                input_tile = torch.nn.functional.pad(input_tile, (0, w_pad, 0, h_pad), mode='reflect')
-
-            # Process tile
-            with torch.no_grad():
-                output_tile = model(input_tile)
-
-            # Remove padding from output
-            if h_pad > 0 or w_pad > 0:
-                output_tile = output_tile[:, :, :tile_height * scale, :tile_width * scale]
-
-            # Calculate output position
-            output_start_x = input_start_x * scale
-            output_end_x = input_end_x * scale
-            output_start_y = input_start_y * scale
-            output_end_y = input_end_y * scale
-
-            # Place tile in output with blending for overlaps
-            if x > 0:  # Blend left edge
-                blend_start_x = output_start_x
-                blend_end_x = output_start_x + output_overlap
-                alpha = torch.linspace(0, 1, blend_end_x - blend_start_x, device=img.device).view(1, 1, 1, -1)
-
-                output[:, :, output_start_y:output_end_y, blend_start_x:blend_end_x] = (
-                        output[:, :, output_start_y:output_end_y, blend_start_x:blend_end_x] * (1 - alpha) +
-                        output_tile[:, :, :, :output_overlap] * alpha
-                )
-                output[:, :, output_start_y:output_end_y, blend_end_x:output_end_x] = \
-                    output_tile[:, :, :, output_end_x - blend_end_x]
-            else:
-                output[:, :, output_start_y:output_end_y, output_start_x:output_end_x] = output_tile
-
-    return output
-
-
-def test_single_image(model, lr_img, device, args):
-    """Test model on a single image"""
+def test_model(model, test_data, device):
+    """Тестирование модели на одном образце"""
     model.eval()
 
-    # Convert to tensor
-    lr_tensor = torch.from_numpy(lr_img).unsqueeze(0).unsqueeze(0).float().to(device)
+    with torch.no_grad():
+        # Подготовка данных
+        lr_tensor = test_data['lq'].unsqueeze(0).to(device)
+        hr_tensor = test_data['gt'].unsqueeze(0).to(device)
 
-    # Process
-    if lr_img.shape[0] > args.tile_size or lr_img.shape[1] > args.tile_size:
-        # Use tiling for large images
-        sr_tensor = tile_process(model, lr_tensor, args.scale_factor,
-                                 args.tile_size, args.tile_overlap, args.window_size)
-    else:
-        # Process entire image at once
-        _, _, h, w = lr_tensor.size()
-        h_pad = (h // args.window_size + 1) * args.window_size - h if h % args.window_size != 0 else 0
-        w_pad = (w // args.window_size + 1) * args.window_size - w if w % args.window_size != 0 else 0
+        # Паддинг для window_size
+        _, _, h_old, w_old = lr_tensor.size()
+        window_size = 8
+        h_pad = (h_old // window_size + 1) * window_size - h_old
+        w_pad = (w_old // window_size + 1) * window_size - w_old
+        lr_tensor = torch.cat([lr_tensor, torch.flip(lr_tensor, [2])], 2)[:, :, :h_old + h_pad, :]
+        lr_tensor = torch.cat([lr_tensor, torch.flip(lr_tensor, [3])], 3)[:, :, :, :w_old + w_pad]
 
-        if h_pad > 0 or w_pad > 0:
-            lr_tensor = torch.nn.functional.pad(lr_tensor, (0, w_pad, 0, h_pad), mode='reflect')
+        # Прогон через модель
+        sr_tensor = model(lr_tensor)
 
-        with torch.no_grad():
-            sr_tensor = model(lr_tensor)
+        # Обрезка паддинга
+        sr_tensor = sr_tensor[..., :h_old * test_data['scale_factor'], :w_old * test_data['scale_factor']]
+        sr_tensor = torch.clamp(sr_tensor, 0, 1)
 
-        if h_pad > 0 or w_pad > 0:
-            sr_tensor = sr_tensor[:, :, :h * args.scale_factor, :w * args.scale_factor]
+    # Конвертация в numpy
+    lr_img = lr_tensor[0, 0, :h_old, :w_old].cpu().numpy()
+    hr_img = hr_tensor[0, 0].cpu().numpy()
+    sr_img = sr_tensor[0, 0].cpu().numpy()
 
-    # Convert back to numpy
-    sr_img = sr_tensor[0, 0].cpu().clamp(0, 1).numpy()
+    # Восстановление оригинальных значений температуры
+    if 'metadata' in test_data:
+        meta = test_data['metadata']
+        if 'original_min' in meta and 'original_max' in meta:
+            # Денормализация
+            hr_img = hr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
+            sr_img = sr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
+            lr_img = lr_img * (meta['original_max'] - meta['original_min']) + meta['original_min']
 
-    return sr_img
+    results = {
+        'lr': lr_img,
+        'hr': hr_img,
+        'sr': sr_img,
+        'metadata': test_data.get('metadata', {})
+    }
+
+    # Вычисление метрик
+    # Конвертируем в uint8 для PSNR/SSIM
+    hr_uint8 = ((hr_img - hr_img.min()) / (hr_img.max() - hr_img.min()) * 255).astype(np.uint8)
+    sr_uint8 = ((sr_img - sr_img.min()) / (sr_img.max() - sr_img.min()) * 255).astype(np.uint8)
+
+    psnr = calculate_psnr(sr_uint8, hr_uint8, crop_border=0)
+    ssim = calculate_ssim(sr_uint8, hr_uint8, crop_border=0)
+
+    # Метрики в физических единицах
+    mse = np.mean((sr_img - hr_img) ** 2)
+    mae = np.mean(np.abs(sr_img - hr_img))
+    max_error = np.max(np.abs(sr_img - hr_img))
+
+    results['metrics'] = {
+        'psnr': psnr,
+        'ssim': ssim,
+        'mse': mse,
+        'mae': mae,
+        'temperature_error_mean': mae,
+        'temperature_error_max': max_error
+    }
+
+    return results
 
 
 def save_comparison_plot(results, save_path, idx):
-    """Save comparison visualization"""
+    """Сохранение сравнительного изображения"""
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
-    # Low resolution
+    # Низкое разрешение
     im1 = axes[0, 0].imshow(results['lr'], cmap='viridis', aspect='auto')
     axes[0, 0].set_title(f'Low Resolution ({results["lr"].shape[0]}×{results["lr"].shape[1]})')
     axes[0, 0].axis('off')
     plt.colorbar(im1, ax=axes[0, 0], fraction=0.046)
 
-    # High resolution (Ground Truth)
+    # Высокое разрешение (Ground Truth)
     im2 = axes[0, 1].imshow(results['hr'], cmap='viridis', aspect='auto')
     axes[0, 1].set_title(f'High Resolution GT ({results["hr"].shape[0]}×{results["hr"].shape[1]})')
     axes[0, 1].axis('off')
     plt.colorbar(im2, ax=axes[0, 1], fraction=0.046)
 
-    # Super Resolution result
+    # Super Resolution результат
     im3 = axes[0, 2].imshow(results['sr'], cmap='viridis', aspect='auto')
     axes[0, 2].set_title(f'Super Resolution ({results["sr"].shape[0]}×{results["sr"].shape[1]})')
     axes[0, 2].axis('off')
     plt.colorbar(im3, ax=axes[0, 2], fraction=0.046)
 
-    # Difference
+    # Разница между HR и SR
     diff = np.abs(results['hr'] - results['sr'])
     im4 = axes[1, 0].imshow(diff, cmap='hot', aspect='auto')
     axes[1, 0].set_title('Absolute Difference (HR - SR)')
     axes[1, 0].axis('off')
     plt.colorbar(im4, ax=axes[1, 0], fraction=0.046)
 
-    # Zoomed regions
+    # Увеличенная область для детального сравнения
     h, w = results['hr'].shape
     crop_size = min(h // 4, w // 4, 64)
     start_h, start_w = h // 2 - crop_size // 2, w // 2 - crop_size // 2
@@ -250,11 +176,12 @@ def save_comparison_plot(results, save_path, idx):
     axes[1, 2].axis('off')
     plt.colorbar(im6, ax=axes[1, 2], fraction=0.046)
 
-    # Add metrics
+    # Добавляем метрики
     metrics_text = f"PSNR: {results['metrics']['psnr']:.2f} dB\n"
     metrics_text += f"SSIM: {results['metrics']['ssim']:.4f}\n"
-    metrics_text += f"Mean Temp Error: {results['metrics']['mae']:.3f} K\n"
-    metrics_text += f"Max Temp Error: {results['metrics']['max_error']:.3f} K"
+    metrics_text += f"MSE: {results['metrics']['mse']:.4f}\n"
+    metrics_text += f"Mean Temp Error: {results['metrics']['temperature_error_mean']:.2f} K\n"
+    metrics_text += f"Max Temp Error: {results['metrics']['temperature_error_max']:.2f} K"
 
     fig.text(0.02, 0.02, metrics_text, fontsize=10,
              bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8))
@@ -267,47 +194,56 @@ def save_comparison_plot(results, save_path, idx):
 def main():
     args = parse_args()
 
-    # Create output directory
+    # Создаем выходную директорию
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Device
+    # Устройство
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Create model with the same architecture as training
-    print("Creating model...")
-    model = SwinIR(
-        upscale=args.scale_factor,
-        in_chans=1,
-        img_size=args.patch_size,
-        window_size=args.window_size,
-        img_range=1.,
-        depths=[8, 8, 8, 8, 8, 8, 8, 8],
-        embed_dim=240,
-        num_heads=[8, 8, 8, 8, 8, 8, 8, 8],
-        mlp_ratio=2,
-        upsampler='nearest+conv',
-        resi_connection='3conv'
-    ).to(device)
-
-    # Load checkpoint
+    # Загружаем модель
     print(f"Loading model from {args.model_path}")
-    checkpoint_info = load_checkpoint_flexible(model, args.model_path, device)
+    model = define_model(args).to(device)
+
+    # Загружаем checkpoint
+    checkpoint = torch.load(args.model_path, map_location=device,  weights_only=False)
+
+    # Debug: print checkpoint keys
+    if isinstance(checkpoint, dict):
+        print(f"Checkpoint keys: {list(checkpoint.keys())}")
+
+    # Загружаем веса модели
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'], strict=True)
+        elif 'params' in checkpoint:
+            model.load_state_dict(checkpoint['params'], strict=True)
+        elif 'model' in checkpoint:
+            model.load_state_dict(checkpoint['model'], strict=True)
+        else:
+            # Пробуем загрузить напрямую
+            model.load_state_dict(checkpoint, strict=True)
+    else:
+        # Это просто state dict
+        model.load_state_dict(checkpoint, strict=True)
+
     print("Model loaded successfully!")
-
-    if checkpoint_info.get('epoch'):
-        print(f"Loaded model from epoch {checkpoint_info['epoch']}")
-    if checkpoint_info.get('best_psnr'):
-        print(f"Model's best PSNR during training: {checkpoint_info['best_psnr']:.2f}")
-
     model.eval()
 
-    # Load test data
+    # Загружаем тестовые данные
     print(f"Loading test data from {args.input_npz}")
-    data = np.load(args.input_npz, allow_pickle=True)
 
-    # Handle different data formats
+    # Используем TemperatureDataset для загрузки данных
+    from data_preprocessing import TemperatureDataPreprocessor
+    preprocessor = TemperatureDataPreprocessor()
+
+    # Загружаем данные напрямую
+    data = np.load(args.input_npz, allow_pickle=True)
+    print(f"Available keys in NPZ: {list(data.keys())}")
+
+    # Обрабатываем данные в зависимости от формата
     if 'temperature' in data and 'metadata' in data:
+        # Формат с отдельными полями
         temperature = data['temperature'].astype(np.float32)
         metadata = data['metadata'].item() if hasattr(data['metadata'], 'item') else data['metadata']
         swaths = [{
@@ -321,121 +257,88 @@ def main():
     else:
         raise ValueError("Cannot find temperature data in the NPZ file")
 
-    # Limit number of test samples
+    # Ограничиваем количество тестовых образцов
     num_samples = min(args.num_samples, len(swaths))
     print(f"Testing on {num_samples} samples")
 
-    # Test loop
+    # Тестирование
     all_metrics = []
 
     for i in tqdm(range(num_samples), desc="Testing"):
         swath = swaths[i]
-        temp_hr = swath['temperature'].astype(np.float32)
+        temp = swath['temperature'].astype(np.float32)
         meta = swath.get('metadata', {})
 
-        # Remove NaN values
-        if np.any(np.isnan(temp_hr)):
-            temp_hr = np.nan_to_num(temp_hr, nan=np.nanmean(temp_hr))
+        # Предобработка
+        temp = preprocessor.crop_or_pad(temp)
 
-        # Ensure size is divisible by scale factor
-        h, w = temp_hr.shape
-        h_new = h - h % args.scale_factor
-        w_new = w - w % args.scale_factor
-        temp_hr = temp_hr[:h_new, :w_new]
+        # Убеждаемся, что размеры кратны scale_factor
+        h, w = temp.shape
+        h = h - h % args.scale_factor
+        w = w - w % args.scale_factor
+        temp = temp[:h, :w]
 
-        # Store original range
-        temp_min, temp_max = np.min(temp_hr), np.max(temp_hr)
+        temp_min, temp_max = np.min(temp), np.max(temp)
+        temp_norm = preprocessor.normalize_temperature(temp)
 
-        # Normalize to [0, 1]
-        if temp_max > temp_min:
-            temp_hr_norm = (temp_hr - temp_min) / (temp_max - temp_min)
-        else:
-            temp_hr_norm = np.zeros_like(temp_hr)
+        # Создаем LR версию простым даунсэмплингом для тестирования
+        lr = cv2.resize(temp_norm, (w // args.scale_factor, h // args.scale_factor),
+                        interpolation=cv2.INTER_AREA)
+        hr = temp_norm
 
-        # Create LR version
-        h_lr, w_lr = h_new // args.scale_factor, w_new // args.scale_factor
-        temp_lr_norm = cv2.resize(temp_hr_norm, (w_lr, h_lr), interpolation=cv2.INTER_AREA)
-
-        # Super-resolve
-        temp_sr_norm = test_single_image(model, temp_lr_norm, device, args)
-
-        # Denormalize
-        temp_lr = temp_lr_norm * (temp_max - temp_min) + temp_min
-        temp_sr = temp_sr_norm * (temp_max - temp_min) + temp_min
-
-        # Calculate metrics
-        # For PSNR/SSIM, convert to uint8
-        hr_uint8 = ((temp_hr_norm * 255).clip(0, 255)).astype(np.uint8)
-        sr_uint8 = ((temp_sr_norm * 255).clip(0, 255)).astype(np.uint8)
-
-        psnr = calculate_psnr(sr_uint8, hr_uint8, crop_border=0)
-        ssim = calculate_ssim(sr_uint8, hr_uint8, crop_border=0)
-
-        # Temperature-specific metrics
-        mae = np.mean(np.abs(temp_sr - temp_hr))
-        max_error = np.max(np.abs(temp_sr - temp_hr))
-        rmse = np.sqrt(np.mean((temp_sr - temp_hr) ** 2))
-
-        metrics = {
-            'psnr': psnr,
-            'ssim': ssim,
-            'mae': mae,
-            'max_error': max_error,
-            'rmse': rmse
+        # Подготовка данных для модели
+        test_data = {
+            'lq': torch.from_numpy(lr).unsqueeze(0).float(),
+            'gt': torch.from_numpy(hr).unsqueeze(0).float(),
+            'scale_factor': args.scale_factor,
+            'metadata': {
+                'original_min': temp_min,
+                'original_max': temp_max,
+                'orbit_type': meta.get('orbit_type', 'unknown')
+            }
         }
 
-        all_metrics.append(metrics)
+        # Тестирование
+        results = test_model(model, test_data, device)
+        all_metrics.append(results['metrics'])
 
-        # Save results
-        results = {
-            'lr': temp_lr,
-            'hr': temp_hr,
-            'sr': temp_sr,
-            'metrics': metrics,
-            'metadata': meta
-        }
-
+        # Сохранение результатов
         if args.save_comparison:
             save_comparison_plot(results, args.output_dir, i)
 
-        # Save numpy arrays
+        # Сохранение numpy массивов
         np_save_path = os.path.join(args.output_dir, f'result_{i:04d}.npz')
         np.savez(np_save_path,
-                 lr=temp_lr,
-                 hr=temp_hr,
-                 sr=temp_sr,
-                 lr_norm=temp_lr_norm,
-                 hr_norm=temp_hr_norm,
-                 sr_norm=temp_sr_norm,
-                 metrics=metrics,
-                 metadata=meta)
+                 lr=results['lr'],
+                 hr=results['hr'],
+                 sr=results['sr'],
+                 metrics=results['metrics'],
+                 metadata=results['metadata'])
 
-    # Calculate average metrics
+    # Вычисление средних метрик
     avg_metrics = {}
     for key in all_metrics[0].keys():
         avg_metrics[key] = np.mean([m[key] for m in all_metrics])
-        avg_metrics[f'{key}_std'] = np.std([m[key] for m in all_metrics])
 
     print("\n=== Average Metrics ===")
-    print(f"PSNR: {avg_metrics['psnr']:.2f} ± {avg_metrics['psnr_std']:.2f} dB")
-    print(f"SSIM: {avg_metrics['ssim']:.4f} ± {avg_metrics['ssim_std']:.4f}")
-    print(f"MAE: {avg_metrics['mae']:.3f} ± {avg_metrics['mae_std']:.3f} K")
-    print(f"RMSE: {avg_metrics['rmse']:.3f} ± {avg_metrics['rmse_std']:.3f} K")
-    print(f"Max Error: {avg_metrics['max_error']:.3f} ± {avg_metrics['max_error_std']:.3f} K")
+    print(f"PSNR: {avg_metrics['psnr']:.2f} dB")
+    print(f"SSIM: {avg_metrics['ssim']:.4f}")
+    print(f"MSE: {avg_metrics['mse']:.4f}")
+    print(f"MAE: {avg_metrics['mae']:.4f}")
+    print(f"Mean Temperature Error: {avg_metrics['temperature_error_mean']:.2f} K")
+    print(f"Max Temperature Error: {avg_metrics['temperature_error_max']:.2f} K")
 
-    # Save metrics
+    # Сохранение метрик
     metrics_path = os.path.join(args.output_dir, 'test_metrics.txt')
     with open(metrics_path, 'w') as f:
         f.write("=== Test Results ===\n")
         f.write(f"Model: {args.model_path}\n")
         f.write(f"Test data: {args.input_npz}\n")
         f.write(f"Number of samples: {num_samples}\n")
-        f.write(f"Scale factor: {args.scale_factor}\n")
-        f.write(f"Tile size: {args.tile_size}\n")
-        f.write(f"Window size: {args.window_size}\n\n")
+        f.write(f"Scale factor: {args.scale_factor}\n\n")
         f.write("=== Average Metrics ===\n")
-        for key in ['psnr', 'ssim', 'mae', 'rmse', 'max_error']:
-            f.write(f"{key.upper()}: {avg_metrics[key]:.4f} ± {avg_metrics[f'{key}_std']:.4f}\n")
+        for key, value in avg_metrics.items():
+            f.write(f"{key}: {value:.4f}\n")
 
     print(f"\nResults saved to {args.output_dir}")
 

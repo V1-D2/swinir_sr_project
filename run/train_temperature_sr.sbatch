@@ -66,7 +66,7 @@ apptainer exec --nv \
     --data_dir $HOME/temperature_sr_project/data \
     --output_dir ./experiments/temperature_swinir_rect \
     --scale_factor 4 \
-    --patch_height 1024 \
+    --patch_height 640 \
     --patch_width 192 \
     --batch_size 8 \
     --num_epochs 70 \

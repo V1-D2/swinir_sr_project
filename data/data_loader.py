@@ -71,7 +71,7 @@ class TemperatureDataset(Dataset):
             # Resize to 2000x208
             h, w = temp.shape
             if h > 2000 and w > 208:
-                temp = cv2.resize(temp, (2000, 208), interpolation=cv2.INTER_LINEAR)
+                temp = cv2.resize(temp, (208, 2000), interpolation=cv2.INTER_LINEAR)
 
             # Нормализация в [0, 1]
             temp_min, temp_max = np.min(temp), np.max(temp)
@@ -114,7 +114,7 @@ class TemperatureDataset(Dataset):
         temp = swath['temperature'].astype(np.float32)
 
         # Resize to standard size
-        temp = cv2.resize(temp, (2000, 208), interpolation=cv2.INTER_LINEAR)
+        temp = cv2.resize(temp, (208, 2000), interpolation=cv2.INTER_LINEAR)
 
         # Normalize
         temp_min, temp_max = np.min(temp), np.max(temp)

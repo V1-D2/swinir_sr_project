@@ -260,7 +260,7 @@ def create_train_val_dataloaders(train_files: List[str], val_file: str,
         phase='train',
         patch_height=patch_height,
         patch_width=patch_width,
-        samples_per_file=500
+        samples_per_file=1000
     ).get_combined_dataloader()
 
     # Validation dataloader

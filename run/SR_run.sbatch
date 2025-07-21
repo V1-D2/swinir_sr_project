@@ -86,7 +86,7 @@ apptainer exec --nv \
     --output_dir ./experiments/temperature_swinir_rect_2nd_generation \
     --scale_factor 4 \
     --patch_height 512 \
-    --patch_width 192 \
+    --patch_width 128 \
     --batch_size 8 \
     --num_epochs 70 \
     --lr 5e-4

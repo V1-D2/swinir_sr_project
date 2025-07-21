@@ -14,7 +14,7 @@
         "depths": [6, 6, 6, 6, 6, 6],
         "embed_dim": 180,
         "num_heads": [6, 6, 6, 6, 6, 6],
-        "mlp_ratio": 2,
+        "mlp_ratio": 4,
         "upsampler": "nearest+conv",
         "resi_connection": "3conv"
     },
@@ -44,13 +44,13 @@
         "optim_g": {
             "type": "Adam",
             "lr": 3e-4,
-            "weight_decay": 0,
+            "weight_decay": 1e-4,
             "betas": [0.9, 0.99]
         },
         "scheduler": {
             "type": "CosineAnnealingLR",
             "T_max": 100,
-            "eta_min": 1e-7
+            "eta_min": 1e-6
         },
         "total_epochs": 100,
         "warmup_epochs": -1,

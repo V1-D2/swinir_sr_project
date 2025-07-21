@@ -84,8 +84,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, de
 
             # Вычисляем PSNR и SSIM для каждого изображения в батче
             for j in range(sr_np.shape[0]):
-                sr_img = (sr_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
-                gt_img = (gt_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
+                sr_clamped = np.clip(sr_np[j, 0], 0, 1)
+                gt_clamped = np.clip(gt_np[j, 0], 0, 1)
+
+                sr_img = (sr_clamped * 255).astype(np.uint8)
+                gt_img = (gt_clamped * 255).astype(np.uint8)
 
                 psnr_val += calculate_psnr(sr_img, gt_img, crop_border=0)
                 ssim_val += calculate_ssim(sr_img, gt_img, crop_border=0)
@@ -136,8 +139,11 @@ def validate(model, val_loader, criterion, epoch, logger, device):
             gt_np = gt.cpu().numpy()
 
             for j in range(sr_np.shape[0]):
-                sr_img = (sr_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
-                gt_img = (gt_np[j, 0] * 255).clip(0, 255).astype(np.uint8)
+                sr_clamped = np.clip(sr_np[j, 0], 0, 1)
+                gt_clamped = np.clip(gt_np[j, 0], 0, 1)
+
+                sr_img = (sr_clamped * 255).astype(np.uint8)
+                gt_img = (gt_clamped * 255).astype(np.uint8)
 
                 psnr_val = calculate_psnr(sr_img, gt_img, crop_border=0)
                 ssim_val = calculate_ssim(sr_img, gt_img, crop_border=0)

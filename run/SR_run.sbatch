@@ -24,9 +24,9 @@ echo "Installing required packages..."
 apptainer exec --nv \
     --bind $HOME/local-python:$HOME/.local \
     /home/shared/containers/tensorflow-25.02-py3.sif \
-    pip install --user torch torchvision torchaudio timm opencv-python tqdm tensorboard basicsr facexlib gfpgan matplotlib
+    pip install --user basicsr opencv-python timm facexlib gfpgan tqdm matplotlib
 
-# Verify installation and environment
+# Verify environment in TensorFlow container
 echo "Testing environment in TensorFlow container:"
 apptainer exec --nv \
     --bind $HOME/local-python:$HOME/.local \
@@ -54,11 +54,6 @@ try:
 except Exception as e:
     print(f'❌ OpenCV: {e}')
 try:
-    import timm
-    print(f'✅ Timm: {timm.__version__}')
-except Exception as e:
-    print(f'❌ Timm: {e}')
-try:
     import basicsr
     print(f'✅ BasicSR: {basicsr.__version__}')
 except Exception as e:
@@ -69,30 +64,30 @@ echo "============================================"
 echo "Checking data directory..."
 echo "Data should be available at: /scratch/tmp/data"
 ls -la /scratch/tmp/data
-echo "============================================"
 
-echo "Starting Temperature SwinIR SR training with TensorFlow container:"
+echo "============================================"
+echo "Starting Temperature SwinIR training with TensorFlow container:"
 
 # Change to project directory
-cd $HOME/temperature_sr_project
+cd $HOME/swinir_sr_project
 
 # Fix CUDA memory fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Run training with updated data path
+# Run Temperature SR training in TensorFlow container
 apptainer exec --nv \
     --bind $HOME/local-python:$HOME/.local \
-    --bind $HOME/temperature_sr_project:$HOME/temperature_sr_project \
+    --bind $HOME/swinir_sr_project:$HOME/swinir_sr_project \
     --bind /scratch/tmp/data:/scratch/tmp/data \
-    --env PYTHONPATH=$HOME/temperature_sr_project:$PYTHONPATH \
+    --env PYTHONPATH=$HOME/swinir_sr_project:$PYTHONPATH \
     /home/shared/containers/tensorflow-25.02-py3.sif \
     python train_temperature_sr.py \
     --data_dir /scratch/tmp/data \
     --output_dir ./experiments/temperature_swinir_rect \
     --scale_factor 4 \
-    --patch_height 640 \
+    --patch_height 1984 \
     --patch_width 192 \
-    --batch_size 8 \
+    --batch_size 2 \
     --num_epochs 70 \
     --lr 5e-4
 

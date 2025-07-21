@@ -64,7 +64,7 @@ apptainer exec --nv \
     /home/shared/containers/tensorflow-25.02-py3.sif \
     python train_temperature_sr.py \
     --data_dir $HOME/temperature_sr_project/data \
-    --output_dir ./experiments/temperature_swinir_rect \
+    --output_dir ./experiments/temperature_swinir_rect_2nd_generation_1 \
     --scale_factor 4 \
     --patch_height 640 \
     --patch_width 192 \

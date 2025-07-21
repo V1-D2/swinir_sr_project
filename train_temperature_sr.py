@@ -18,7 +18,7 @@ from data.data_loader import create_train_val_dataloaders
 from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
 from utils.logger import Logger
 from utils.common import AverageMeter, save_checkpoint, load_checkpoint
-from utils.temperature_loss import TemperatureAwareLoss, CharbonnierLoss
+from utils.temperature_loss import TemperatureAwareLoss, CharbonnierLoss, PhysicsConsistencyLoss, TemperaturePerceptualLoss
 
 
 def define_model(args):
@@ -44,7 +44,8 @@ def define_model(args):
     return model
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, device):
+def train_one_epoch(model, train_loader, criteria, optimizer, epoch, logger, device):
+    pixel_criterion, perceptual_criterion, perceptual_weight = criteria
     """Обучение одной эпохи"""
     model.train()
 
@@ -62,11 +63,22 @@ def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, de
 
         # Forward pass
         sr = model(lq)
-        loss, loss_dict = criterion(sr, gt)
+
+        # Calculate losses
+        pixel_loss, pixel_loss_dict = pixel_criterion(sr, gt)
+        perceptual_loss = perceptual_criterion(sr, gt)
+
+        # Combine losses
+        total_loss = pixel_loss + perceptual_weight * perceptual_loss
+
+        # Create comprehensive loss dict
+        loss_dict = pixel_loss_dict.copy()
+        loss_dict['perceptual_loss'] = perceptual_loss.item()
+        loss_dict['total_loss'] = total_loss.item()
 
         # Backward pass
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
 
         # Gradient clipping
         #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -115,7 +127,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, epoch, logger, de
     return losses.avg, psnrs.avg, ssims.avg
 
 
-def validate(model, val_loader, criterion, epoch, logger, device):
+def validate(model, val_loader, criteria, epoch, logger, device):
+    pixel_criterion, perceptual_criterion, perceptual_weight = criteria
     """Валидация модели"""
     model.eval()
 
@@ -132,7 +145,15 @@ def validate(model, val_loader, criterion, epoch, logger, device):
 
             # Forward pass
             sr = model(lq)
-            loss, loss_dict = criterion(sr, gt)
+
+            # Calculate losses (same as training)
+            pixel_loss, pixel_loss_dict = pixel_criterion(sr, gt)
+            perceptual_loss = perceptual_criterion(sr, gt)
+            total_loss = pixel_loss + perceptual_weight * perceptual_loss
+
+            loss_dict = pixel_loss_dict.copy()
+            loss_dict['perceptual_loss'] = perceptual_loss.item()
+            loss_dict['total_loss'] = total_loss.item()
 
             # Метрики
             sr_np = sr.cpu().numpy()
@@ -148,7 +169,7 @@ def validate(model, val_loader, criterion, epoch, logger, device):
                 psnr_val = calculate_psnr(sr_img, gt_img, crop_border=0)
                 ssim_val = calculate_ssim(sr_img, gt_img, crop_border=0)
 
-                losses.update(loss.item(), 1)
+                losses.update(total_loss.item(), 1)
                 psnrs.update(psnr_val, 1)
                 ssims.update(ssim_val, 1)
 
@@ -212,7 +233,10 @@ def main(args):
     print(f"Trainable parameters: {trainable_params:,}")
 
     # Loss function и optimizer
-    criterion = TemperatureAwareLoss(alpha=1.0, beta=0.3, gamma=0.15)
+    # Loss functions
+    pixel_criterion = PhysicsConsistencyLoss(gradient_weight=0.1, smoothness_weight=0.05)
+    perceptual_criterion = TemperaturePerceptualLoss(feature_weights=[0.1, 0.2, 1.0, 1.0]).to(device)
+    perceptual_weight = 0.1
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
 
     # Learning rate scheduler
@@ -246,12 +270,13 @@ def main(args):
 
         # Обучение
         train_loss, train_psnr, train_ssim = train_one_epoch(
-            model, train_loader, criterion, optimizer, epoch + 1, logger, device
+            model, train_loader, (pixel_criterion, perceptual_criterion, perceptual_weight), optimizer, epoch + 1,
+            logger, device
         )
 
         # Валидация
         val_loss, val_psnr, val_ssim = validate(
-            model, val_loader, criterion, epoch + 1, logger, device
+            model, val_loader, (pixel_criterion, perceptual_criterion, perceptual_weight), epoch + 1, logger, device
         )
 
         # Обновляем learning rate

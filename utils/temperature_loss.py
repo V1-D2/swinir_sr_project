@@ -75,6 +75,97 @@ class TemperatureAwareLoss(nn.Module):
         return relative_error.mean()
 
 
+# ADD these classes to utils/temperature_loss.py (after existing TemperatureAwareLoss class)
+
+class TemperaturePerceptualLoss(nn.Module):
+    """Perceptual loss adapted for temperature data"""
+
+    def __init__(self, feature_weights=None):
+        super().__init__()
+        if feature_weights is None:
+            self.feature_weights = [1.0, 1.0, 1.0, 1.0]
+        else:
+            self.feature_weights = feature_weights
+
+        # Simple feature extractor for temperature data
+        self.feature_extractor = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(1, 32, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, 32, 3, 2, 1),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(32, 64, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(64, 64, 3, 2, 1),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(64, 128, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(128, 128, 3, 2, 1),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(128, 256, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(256, 256, 3, 2, 1),
+                nn.ReLU(inplace=True)
+            )
+        ])
+
+        # Freeze weights for stability
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, y):
+        loss = 0
+        feat_x = x
+        feat_y = y
+
+        for i, layer in enumerate(self.feature_extractor):
+            feat_x = layer(feat_x)
+            feat_y = layer(feat_y)
+            loss += self.feature_weights[i] * F.l1_loss(feat_x, feat_y)
+
+        return loss
+
+
+class PhysicsConsistencyLoss(nn.Module):
+    """Loss for maintaining physical consistency of temperature data"""
+
+    def __init__(self, gradient_weight=0.1, smoothness_weight=0.05):
+        super().__init__()
+        self.gradient_weight = gradient_weight
+        self.smoothness_weight = smoothness_weight
+
+    def forward(self, pred, target):
+        # Main L1 loss
+        main_loss = F.l1_loss(pred, target)
+
+        # Gradient loss - preserve temperature gradients
+        pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+        pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+        target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+        target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+
+        gradient_loss = F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
+
+        # Smoothness loss - avoid artifacts
+        smooth_x = pred[:, :, :, 2:] - 2 * pred[:, :, :, 1:-1] + pred[:, :, :, :-2]
+        smooth_y = pred[:, :, 2:, :] - 2 * pred[:, :, 1:-1, :] + pred[:, :, :-2, :]
+        smoothness_loss = torch.mean(torch.abs(smooth_x)) + torch.mean(torch.abs(smooth_y))
+
+        total_loss = main_loss + self.gradient_weight * gradient_loss + self.smoothness_weight * smoothness_loss
+
+        return total_loss, {
+            'main': main_loss,
+            'gradient': gradient_loss,
+            'smoothness': smoothness_loss
+        }
+
+
 class CharbonnierLoss(nn.Module):
     """Charbonnier Loss (L1 with better gradients near zero)"""
 

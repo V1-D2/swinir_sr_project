@@ -174,11 +174,20 @@ class TemperatureDataset(Dataset):
 
         if self.phase == 'train':
             # Применяем деградацию
+            '''
             temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
                 temp_hr_patch,
                 lq_patchsize_h=temp_hr_patch.shape[0] // self.scale_factor,
                 lq_patchsize_w=temp_hr_patch.shape[1] // self.scale_factor
             )
+            '''
+            # Replace the BSRGAN degradation with simple downsampling
+            h, w = temp_hr_patch.shape
+            temp_lr_patch = cv2.resize(temp_hr_patch,
+                                       (w // self.scale_factor, h // self.scale_factor),
+                                       interpolation=cv2.INTER_AREA)
+
+
         else:
             # Простой даунсэмплинг для валидации
             h, w = temp_hr_patch.shape

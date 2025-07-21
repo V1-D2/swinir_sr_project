@@ -19,6 +19,37 @@ from utils.util_calculate_psnr_ssim import calculate_psnr, calculate_ssim
 import torch.nn.functional as F
 
 
+def process_full_image_by_patches(model, full_image, scale_factor, device):
+    """Process full image by splitting into patches"""
+    h, w = full_image.shape
+    patch_h, patch_w = 512, 128
+
+    # Create output image
+    output_h, output_w = h * scale_factor, w * scale_factor
+    output_image = np.zeros((output_h, output_w), dtype=np.float32)
+
+    # Process each patch
+    for y in range(0, h, patch_h):
+        for x in range(0, w, patch_w):
+            if y + patch_h <= h and x + patch_w <= w:
+                # Extract patch
+                patch = full_image[y:y + patch_h, x:x + patch_w]
+
+                # Process through model
+                patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).float().to(device)
+                with torch.no_grad():
+                    sr_patch = model(patch_tensor)
+                sr_patch = sr_patch[0, 0].cpu().numpy()
+
+                # Place in output
+                out_y = y * scale_factor
+                out_x = x * scale_factor
+                output_image[out_y:out_y + patch_h * scale_factor,
+                out_x:out_x + patch_w * scale_factor] = sr_patch
+
+    return output_image
+
+
 
 
 def parse_args():

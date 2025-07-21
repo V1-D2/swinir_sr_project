@@ -87,7 +87,7 @@ apptainer exec --nv \
     --scale_factor 4 \
     --patch_height 512 \
     --patch_width 192 \
-    --batch_size 2 \
+    --batch_size 8 \
     --num_epochs 70 \
     --lr 5e-4
 

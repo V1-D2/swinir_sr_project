@@ -222,8 +222,7 @@ def degradation_bsrgan_temperature_rect(img, sf=4, lq_patchsize_h=72, lq_patchsi
     h, w = img.shape
 
     if h < lq_patchsize_h * sf or w < lq_patchsize_w * sf:
-        raise ValueError(
-            f'Image size ({h1}x{w1}) is too small for patch size {lq_patchsize_h}x{lq_patchsize_w} with scale factor {sf}!')
+        pass
 
     hq = img.copy()
 

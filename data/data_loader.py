@@ -51,8 +51,9 @@ class TemperatureDataset(Dataset):
             raise KeyError(f"Neither 'swaths' nor 'swath_array' found in {npz_file}")
 
         # Подготавливаем список температурных массивов
-        self.temperatures = []
-        self.metadata = []
+        # Подготавливаем список температурных массивов
+        self.temperature_patches = []
+        self.metadata_list = []
 
         n_samples = len(self.swaths) if max_samples is None else min(len(self.swaths), max_samples)
 
@@ -67,6 +68,11 @@ class TemperatureDataset(Dataset):
                 mean_val = np.nanmean(temp)
                 temp[mask] = mean_val
 
+            # Resize to 2000x208
+            h, w = temp.shape
+            if h > 2000 and w > 208:
+                temp = cv2.resize(temp, (2000, 208), interpolation=cv2.INTER_LINEAR)
+
             # Нормализация в [0, 1]
             temp_min, temp_max = np.min(temp), np.max(temp)
             if temp_max > temp_min:
@@ -74,21 +80,62 @@ class TemperatureDataset(Dataset):
             else:
                 temp_norm = np.zeros_like(temp)
 
-            self.temperatures.append(temp_norm)
-            self.metadata.append({
-                'original_min': temp_min,
-                'original_max': temp_max,
-                'orbit_type': swath['metadata'].get('orbit_type', 'unknown')
-            })
+            # Split into patches (e.g., 512x128 with small overlap)
+            patch_width = 128
+            patch_height = 512
+            overlap = 32  # Small overlap between patches
 
-            if (i + 1) % 1000 == 0:
-                print(f"  Processed {i + 1}/{n_samples} samples")
+            # Calculate number of patches needed
+            h, w = temp_norm.shape
+            stride_w = patch_width - overlap
+            stride_h = patch_height - overlap
+
+            for y in range(0, h - patch_height + 1, stride_h):
+                for x in range(0, w - patch_width + 1, stride_w):
+                    patch = temp_norm[y:y + patch_height, x:x + patch_width]
+                    self.temperature_patches.append(patch)
+                    self.metadata_list.append({
+                        'original_min': temp_min,
+                        'original_max': temp_max,
+                        'orbit_type': swath['metadata'].get('orbit_type', 'unknown'),
+                        'patch_idx': len(self.temperature_patches) - 1,
+                        'source_idx': i
+                    })
+
+            if (i + 1) % 100 == 0:
+                print(f"  Processed {i + 1}/{n_samples} samples, total patches: {len(self.temperature_patches)}")
 
         data.close()
         gc.collect()
 
+    def get_full_image_for_validation(self, idx):
+        """Get full image split into patches for validation"""
+        swath = self.swaths[idx]
+        temp = swath['temperature'].astype(np.float32)
+
+        # Resize to standard size
+        temp = cv2.resize(temp, (2000, 208), interpolation=cv2.INTER_LINEAR)
+
+        # Normalize
+        temp_min, temp_max = np.min(temp), np.max(temp)
+        temp_norm = (temp - temp_min) / (temp_max - temp_min) if temp_max > temp_min else np.zeros_like(temp)
+
+        # Split into patches
+        patches = []
+        positions = []
+        h, w = temp_norm.shape
+
+        for y in range(0, h, 512):  # Step by patch height (512)
+            for x in range(0, w, 128):  # Step by patch width (128)
+                if y + 512 <= h and x + 128 <= w:
+                    patch = temp_norm[y:y + 512, x:x + 128]  # 512x128 patch
+                    patches.append(patch)
+                    positions.append((y, x))
+
+        return patches, positions, (h, w), {'original_min': temp_min, 'original_max': temp_max}
+
     def __len__(self):
-        return len(self.temperatures)
+        return len(self.temperature_patches)
 
     def random_crop(self, img: np.ndarray, patch_size: int) -> np.ndarray:
         """Случайный кроп патча из изображения"""
@@ -121,37 +168,20 @@ class TemperatureDataset(Dataset):
         return img[top:top + patch_height, left:left + patch_width]
 
     def __getitem__(self, idx):
-        # Получаем температурный массив
-        temp_hr = self.temperatures[idx]
-        meta = self.metadata[idx]
+        # Получаем патч
+        temp_hr_patch = self.temperature_patches[idx]
+        meta = self.metadata_list[idx]
 
         if self.phase == 'train':
-            # Для обучения - случайный кроп
-            temp_hr_patch = self.random_crop_rect(temp_hr, self.patch_height, self.patch_width)
-
-            # Применяем деградацию (lq_patchsize should be patch_size for HR, it gets divided internally)
+            # Применяем деградацию
             temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
                 temp_hr_patch,
-                lq_patchsize_h=self.patch_height // self.scale_factor,
-                lq_patchsize_w=self.patch_width // self.scale_factor
+                lq_patchsize_h=temp_hr_patch.shape[0] // self.scale_factor,
+                lq_patchsize_w=temp_hr_patch.shape[1] // self.scale_factor
             )
         else:
-            # Для валидации - центральный кроп или весь массив
-            h, w = temp_hr.shape
-            if h > self.patch_size and w > self.patch_size:
-                top = (h - self.patch_size) // 2
-                left = (w - self.patch_size) // 2
-                temp_hr_patch = temp_hr[top:top + self.patch_size, left:left + self.patch_size]
-            else:
-                temp_hr_patch = temp_hr
-
-            # Применяем фиксированную деградацию для валидации
-            h, w = temp_hr_patch.shape
-            h = h - h % self.scale_factor
-            w = w - w % self.scale_factor
-            temp_hr_patch = temp_hr_patch[:h, :w]
-
             # Простой даунсэмплинг для валидации
+            h, w = temp_hr_patch.shape
             temp_lr_patch = cv2.resize(temp_hr_patch,
                                        (w // self.scale_factor, h // self.scale_factor),
                                        interpolation=cv2.INTER_AREA)
@@ -161,8 +191,8 @@ class TemperatureDataset(Dataset):
         hr_tensor = torch.from_numpy(temp_hr_patch).unsqueeze(0).float()
 
         return {
-            'lq': lr_tensor,  # low quality (low resolution)
-            'gt': hr_tensor,  # ground truth (high resolution)
+            'lq': lr_tensor,
+            'gt': hr_tensor,
             'lq_path': f'{self.npz_file}_{idx}',
             'gt_path': f'{self.npz_file}_{idx}'
         }
@@ -230,7 +260,7 @@ def create_train_val_dataloaders(train_files: List[str], val_file: str,
         phase='train',
         patch_height=patch_height,
         patch_width=patch_width,
-        samples_per_file=1000
+        samples_per_file=500
     ).get_combined_dataloader()
 
     # Validation dataloader

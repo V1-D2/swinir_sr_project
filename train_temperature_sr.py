@@ -338,9 +338,9 @@ if __name__ == '__main__':
                         help='Super-resolution scale factor')
     parser.add_argument('--patch_size', type=int, default=128,
                         help='Training patch size')
-    parser.add_argument('--patch_height', type=int, default=800,
+    parser.add_argument('--patch_height', type=int, default=512,
                         help='Training patch height (defaults to patch_size if not set)')
-    parser.add_argument('--patch_width', type=int, default=200,
+    parser.add_argument('--patch_width', type=int, default=128,
                         help='Training patch width (defaults to patch_size if not set)')
 
     # Training parameters

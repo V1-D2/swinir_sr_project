@@ -1,5 +1,5 @@
 {
-    "name": "temperature_swinir_bsrgan_x4",
+    "name": "temperature_swinir_bsrgan_x4_2nd_generation",
     "model_type": "SwinIR",
     "scale": 4,
     "gpu_ids": [0],

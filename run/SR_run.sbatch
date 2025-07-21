@@ -85,7 +85,7 @@ apptainer exec --nv \
     --data_dir /scratch/tmp/data \
     --output_dir ./experiments/temperature_swinir_rect_2nd_generation \
     --scale_factor 4 \
-    --patch_height 1024 \
+    --patch_height 512 \
     --patch_width 192 \
     --batch_size 2 \
     --num_epochs 70 \

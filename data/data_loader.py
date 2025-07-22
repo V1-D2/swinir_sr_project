@@ -11,7 +11,7 @@ import sys
 sys.path.append('..')
 from models.degradation_bsrgan import TemperatureDegradation
 
-
+'''
 class TemperatureDataset(Dataset):
     def __init__(self, npz_file: str, scale_factor: int = 4,
                  patch_size: int = 128, max_samples: Optional[int] = None,
@@ -122,8 +122,8 @@ class TemperatureDataset(Dataset):
             'gt_path': f'{self.npz_file}_{idx}'
         }
 
-
 '''
+
 class TemperatureDataset(Dataset):
     """Dataset для температурных данных с BSRGAN деградацией"""
 
@@ -286,13 +286,13 @@ class TemperatureDataset(Dataset):
 
         if self.phase == 'train':
             # Применяем деградацию
-            '' Comment BSRGAN
+            ''' Comment BSRGAN
             temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
                 temp_hr_patch,
                 lq_patchsize_h=temp_hr_patch.shape[0] // self.scale_factor,
                 lq_patchsize_w=temp_hr_patch.shape[1] // self.scale_factor
             )
-            '' Comment BSRGAN
+             Comment BSRGAN'''
             # Replace the BSRGAN degradation with simple downsampling
             h, w = temp_hr_patch.shape
             temp_lr_patch = cv2.resize(temp_hr_patch,
@@ -318,7 +318,7 @@ class TemperatureDataset(Dataset):
             'gt_path': f'{self.npz_file}_{idx}'
         }
 
-'''
+
 class MultiFileDataLoader:
     """Загрузчик для работы с несколькими NPZ файлами"""
 

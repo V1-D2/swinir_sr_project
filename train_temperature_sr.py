@@ -226,6 +226,11 @@ def main(args):
     print("Creating model...")
     model = define_model(args).to(device)
 
+    # For 2 GPU
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+        print(f"Using {torch.cuda.device_count()} GPUs")
+
     # Подсчет параметров
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

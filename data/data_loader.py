@@ -13,6 +13,118 @@ from models.degradation_bsrgan import TemperatureDegradation
 
 
 class TemperatureDataset(Dataset):
+    def __init__(self, npz_file: str, scale_factor: int = 4,
+                 patch_size: int = 128, max_samples: Optional[int] = None,
+                 phase: str = 'train', patch_height: int = 512, patch_width: int = 128):
+        self.npz_file = npz_file
+        self.scale_factor = scale_factor
+        self.patch_size = patch_size
+        self.phase = phase
+        self.max_samples = max_samples
+        self.patch_height = patch_height
+        self.patch_width = patch_width
+
+        # Initialize degradation
+        self.degradation = TemperatureDegradation(scale_factor=scale_factor)
+
+        # ONLY store indices, not actual data
+        print(f"Loading metadata from {npz_file}...")
+        data = np.load(npz_file, allow_pickle=True)
+
+        if 'swaths' in data:
+            swaths = data['swaths']
+        elif 'swath_array' in data:
+            swaths = data['swath_array']
+        else:
+            raise KeyError(f"Neither 'swaths' nor 'swath_array' found in {npz_file}")
+
+        # Calculate total number of patches WITHOUT loading data
+        self.patch_indices = []  # [(swath_idx, patch_y, patch_x), ...]
+
+        n_samples = len(swaths) if max_samples is None else min(len(swaths), max_samples)
+
+        for i in range(n_samples):
+            # Calculate how many patches this swath will generate
+            patch_height, patch_width = 512, 128
+            overlap = 32
+            stride_h, stride_w = patch_height - overlap, patch_width - overlap
+
+            # Assume standard size after resize
+            img_h, img_w = 2000, 208
+
+            for y in range(0, img_h - patch_height + 1, stride_h):
+                for x in range(0, img_w - patch_width + 1, stride_w):
+                    self.patch_indices.append((i, y, x))
+
+        data.close()
+        print(f"Dataset ready with {len(self.patch_indices)} patches")
+
+    def __len__(self):
+        return len(self.patch_indices)
+
+    def __getitem__(self, idx):
+        swath_idx, patch_y, patch_x = self.patch_indices[idx]
+
+        # Load data on-demand
+        data = np.load(self.npz_file, allow_pickle=True)
+        if 'swaths' in data:
+            swaths = data['swaths']
+        elif 'swath_array' in data:
+            swaths = data['swath_array']
+
+        swath = swaths[swath_idx]
+        temp = swath['temperature'].astype(np.float32)
+
+        # Process the temperature data
+        mask = np.isnan(temp)
+        if mask.any():
+            mean_val = np.nanmean(temp)
+            temp[mask] = mean_val
+
+        # Resize
+        temp = cv2.resize(temp, (208, 2000), interpolation=cv2.INTER_LINEAR)
+
+        # Normalize
+        temp_min, temp_max = np.min(temp), np.max(temp)
+        if temp_max > temp_min:
+            temp_norm = (temp - temp_min) / (temp_max - temp_min)
+        else:
+            temp_norm = np.zeros_like(temp)
+
+        # Extract the specific patch
+        patch_height, patch_width = 512, 128
+        patch = temp_norm[patch_y:patch_y + patch_height, patch_x:patch_x + patch_width]
+
+        # Apply degradation
+        if self.phase == 'train':
+            temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
+                patch,
+                lq_patchsize_h=patch_height // self.scale_factor,
+                lq_patchsize_w=patch_width // self.scale_factor
+            )
+        else:
+            h, w = patch.shape
+            temp_lr_patch = cv2.resize(patch,
+                                       (w // self.scale_factor, h // self.scale_factor),
+                                       interpolation=cv2.INTER_AREA)
+            temp_hr_patch = patch
+
+        # Convert to tensors
+        lr_tensor = torch.from_numpy(temp_lr_patch).unsqueeze(0).float()
+        hr_tensor = torch.from_numpy(temp_hr_patch).unsqueeze(0).float()
+
+        data.close()  # Important: close the file
+
+        return {
+            'lq': lr_tensor,
+            'gt': hr_tensor,
+            'lq_path': f'{self.npz_file}_{idx}',
+            'gt_path': f'{self.npz_file}_{idx}'
+        }
+
+
+'''
+class TemperatureDataset(Dataset):
     """Dataset для температурных данных с BSRGAN деградацией"""
 
     def __init__(self, npz_file: str, scale_factor: int = 4,
@@ -174,13 +286,13 @@ class TemperatureDataset(Dataset):
 
         if self.phase == 'train':
             # Применяем деградацию
-            '''
+            '' Comment BSRGAN
             temp_lr_patch, temp_hr_patch = self.degradation.degradation_bsrgan_rect(
                 temp_hr_patch,
                 lq_patchsize_h=temp_hr_patch.shape[0] // self.scale_factor,
                 lq_patchsize_w=temp_hr_patch.shape[1] // self.scale_factor
             )
-            '''
+            '' Comment BSRGAN
             # Replace the BSRGAN degradation with simple downsampling
             h, w = temp_hr_patch.shape
             temp_lr_patch = cv2.resize(temp_hr_patch,
@@ -206,7 +318,7 @@ class TemperatureDataset(Dataset):
             'gt_path': f'{self.npz_file}_{idx}'
         }
 
-
+'''
 class MultiFileDataLoader:
     """Загрузчик для работы с несколькими NPZ файлами"""
 

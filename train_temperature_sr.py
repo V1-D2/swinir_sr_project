@@ -126,7 +126,8 @@ def train_one_epoch(model, train_loader, criteria, optimizer, epoch, logger, dev
 
     return losses.avg, psnrs.avg, ssims.avg
 
-
+'''
+MAIN VALIDATION FUNCTION
 def validate(model, val_loader, criteria, epoch, logger, device):
     pixel_criterion, perceptual_criterion, perceptual_weight = criteria
     """Валидация модели"""
@@ -181,6 +182,94 @@ def validate(model, val_loader, criteria, epoch, logger, device):
 
     logger.log_validation(epoch, losses.avg, psnrs.avg, ssims.avg)
 
+    return losses.avg, psnrs.avg, ssims.avg
+
+'''
+
+
+def validate(model, val_loader, criteria, epoch, logger, device):
+    pixel_criterion, perceptual_criterion, perceptual_weight = criteria
+    """Validation on full images"""
+    model.eval()
+
+    losses = AverageMeter()
+    psnrs = AverageMeter()
+    ssims = AverageMeter()
+
+    # Get the dataset from the dataloader
+    val_dataset = val_loader.dataset
+
+    # Process only a subset of full images for validation
+    num_val_images = min(10, len(val_dataset.swaths))  # Validate on 10 full images
+
+    with torch.no_grad():
+        pbar = tqdm(range(num_val_images), desc=f'Validation {epoch}')
+
+        for idx in pbar:
+            # Get full image split into patches
+            patches, positions, full_size, metadata = val_dataset.get_full_image_for_validation(idx)
+            h_full, w_full = full_size
+
+            # Create full resolution output image
+            sr_full = np.zeros((h_full, w_full), dtype=np.float32)
+            weight_map = np.zeros((h_full, w_full), dtype=np.float32)
+
+            # Process each patch
+            for patch, (y, x) in zip(patches, positions):
+                # Convert to tensor and add batch/channel dimensions
+                patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).float().to(device)
+
+                # Process through model
+                sr_patch = model(patch_tensor)
+                sr_patch = sr_patch[0, 0].cpu().numpy()
+
+                # Add to full image with blending for overlaps
+                sr_full[y:y + 512, x:x + 128] += sr_patch
+                weight_map[y:y + 512, x:x + 128] += 1.0
+
+            # Normalize by weight map to handle overlaps
+            sr_full = sr_full / np.maximum(weight_map, 1.0)
+            sr_full = np.clip(sr_full, 0, 1)
+
+            # Create LR version of full image for loss calculation
+            lr_full = cv2.resize(sr_full, (w_full // 4, h_full // 4), interpolation=cv2.INTER_AREA)
+
+            # Convert to tensors for loss calculation
+            sr_tensor = torch.from_numpy(sr_full).unsqueeze(0).unsqueeze(0).float().to(device)
+            gt_tensor = torch.from_numpy(patches[0]).unsqueeze(0).unsqueeze(0).float().to(
+                device)  # This needs the full GT
+
+            # For proper validation, we need the full GT image. Let's get it:
+            swath = val_dataset.swaths[idx]
+            temp = swath['temperature'].astype(np.float32)
+            temp = cv2.resize(temp, (208, 2000), interpolation=cv2.INTER_LINEAR)
+            temp_min, temp_max = np.min(temp), np.max(temp)
+            temp_norm = (temp - temp_min) / (temp_max - temp_min) if temp_max > temp_min else np.zeros_like(temp)
+            gt_tensor = torch.from_numpy(temp_norm).unsqueeze(0).unsqueeze(0).float().to(device)
+
+            # Calculate losses on full images
+            pixel_loss, pixel_loss_dict = pixel_criterion(sr_tensor, gt_tensor)
+            perceptual_loss = perceptual_criterion(sr_tensor, gt_tensor)
+            total_loss = pixel_loss + perceptual_weight * perceptual_loss
+
+            # Calculate metrics on full images
+            sr_img = (sr_full * 255).astype(np.uint8)
+            gt_img = (temp_norm * 255).astype(np.uint8)
+
+            psnr_val = calculate_psnr(sr_img, gt_img, crop_border=0)
+            ssim_val = calculate_ssim(sr_img, gt_img, crop_border=0)
+
+            losses.update(total_loss.item(), 1)
+            psnrs.update(psnr_val, 1)
+            ssims.update(ssim_val, 1)
+
+            pbar.set_postfix({
+                'Loss': f'{losses.avg:.4f}',
+                'PSNR': f'{psnrs.avg:.2f}',
+                'SSIM': f'{ssims.avg:.4f}'
+            })
+
+    logger.log_validation(epoch, losses.avg, psnrs.avg, ssims.avg)
     return losses.avg, psnrs.avg, ssims.avg
 
 

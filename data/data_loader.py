@@ -336,21 +336,22 @@ class TemperatureDataset(Dataset):
         # Initialize degradation
         self.degradation = TemperatureDegradation(scale_factor=scale_factor)
 
-        # Open NPZ file with memory mapping
-        self._npz_file = np.load(npz_file, allow_pickle=True, mmap_mode='r')
+        # Don't open file here, just get metadata
+        self._npz_file = None  # Will be opened lazily
 
-        if 'swaths' in self._npz_file:
-            self.swaths_key = 'swaths'
-        elif 'swath_array' in self._npz_file:
-            self.swaths_key = 'swath_array'
-        else:
-            raise KeyError(f"Neither 'swaths' nor 'swath_array' found in {npz_file}")
+        # Quick open just to get structure
+        with np.load(npz_file, allow_pickle=True) as data:
+            if 'swaths' in data:
+                self.swaths_key = 'swaths'
+            elif 'swath_array' in data:
+                self.swaths_key = 'swath_array'
+            else:
+                raise KeyError(f"Neither 'swaths' nor 'swath_array' found in {npz_file}")
 
-        # Get number of swaths
-        swaths = self._npz_file[self.swaths_key]
-        n_samples = len(swaths) if max_samples is None else min(len(swaths), max_samples)
+            swaths = data[self.swaths_key]
+            n_samples = len(swaths) if max_samples is None else min(len(swaths), max_samples)
 
-        # Calculate patch indices
+        # Calculate patch indices (same as before)
         self.patch_indices = []
         patch_height, patch_width = 512, 128
         overlap = 32
@@ -364,10 +365,18 @@ class TemperatureDataset(Dataset):
 
         print(f"Dataset ready with {len(self.patch_indices)} patches")
 
+    def _ensure_file_open(self):
+        """Open file if not already open (per-worker)"""
+        if self._npz_file is None:
+            self._npz_file = np.load(self.npz_file, allow_pickle=True, mmap_mode='r')
+
     def __len__(self):
         return len(self.patch_indices)
 
     def __getitem__(self, idx):
+        # Ensure file is open in this worker
+        self._ensure_file_open()
+
         swath_idx, patch_y, patch_x = self.patch_indices[idx]
 
         # Access swath directly from memory-mapped file

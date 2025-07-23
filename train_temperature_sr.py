@@ -34,9 +34,9 @@ def define_model(args):
         img_size=img_size,
         window_size=8,
         img_range=1.,
-        depths=[6, 6, 6, 6, 6, 6],
+        depths=[6, 6, 6, 6],
         embed_dim=180,
-        num_heads=[6, 6, 6, 6, 6, 6],
+        num_heads=[6, 6, 6, 6],
         mlp_ratio=2,
         upsampler='nearest+conv',
         resi_connection='3conv'

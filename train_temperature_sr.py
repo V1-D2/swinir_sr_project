@@ -290,12 +290,18 @@ def main(args):
 
     # Создаем датасеты
     # Get all NPZ files in the data directory
+    # Get all NPZ files in the data directory
     import glob
     all_npz_files = glob.glob(os.path.join(args.data_dir, '*.npz'))
     if not all_npz_files:
         raise FileNotFoundError(f"No NPZ files found in {args.data_dir}")
 
-    print(f"Found {len(all_npz_files)} NPZ files: {[os.path.basename(f) for f in all_npz_files]}")
+    # Limit number of files if specified
+    if args.max_files is not None and args.max_files < len(all_npz_files):
+        all_npz_files = all_npz_files[:args.max_files]
+        print(f"Limited to first {args.max_files} files")
+
+    print(f"Using {len(all_npz_files)} NPZ files: {[os.path.basename(f) for f in all_npz_files]}")
 
     # Use most files for training, last one for validation
     train_files = all_npz_files[:-1] if len(all_npz_files) > 1 else all_npz_files
@@ -451,6 +457,9 @@ if __name__ == '__main__':
                         help='Path to data directory with NPZ files')
     parser.add_argument('--output_dir', type=str, default='./experiments/temperature_sr',
                         help='Path to save outputs')
+
+    parser.add_argument('--max_files', type=int, default=None,
+                        help='Maximum number of NPZ files to process (default: all files)')
 
     # Model parameters
     parser.add_argument('--scale_factor', type=int, default=4,

@@ -87,9 +87,10 @@ apptainer exec --nv \
     --scale_factor 4 \
     --patch_height 512 \
     --patch_width 128 \
-    --batch_size 2 \
+    --batch_size 8 \
     --num_epochs 70 \
     --lr 5e-4
+    --max_files 100
 
 echo "============================================"
 echo "Temperature SwinIR Training Job Finished: $(date)"

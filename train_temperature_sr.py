@@ -126,8 +126,7 @@ def train_one_epoch(model, train_loader, criteria, optimizer, epoch, logger, dev
 
     return losses.avg, psnrs.avg, ssims.avg
 
-'''
-MAIN VALIDATION FUNCTION
+
 def validate(model, val_loader, criteria, epoch, logger, device):
     pixel_criterion, perceptual_criterion, perceptual_weight = criteria
     """Валидация модели"""
@@ -269,6 +268,7 @@ def validate(model, val_loader, criteria, epoch, logger, device):
 
     logger.log_validation(epoch, losses.avg, psnrs.avg, ssims.avg)
     return losses.avg, psnrs.avg, ssims.avg
+'''
 
 def main(args):
     """Основная функция обучения"""

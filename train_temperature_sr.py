@@ -200,7 +200,7 @@ def validate(model, val_loader, criteria, epoch, logger, device):
     val_dataset = val_loader.dataset
 
     # Process only a subset of full images for validation
-    num_val_images = min(10, len(val_dataset.swaths))  # Validate on 10 full images
+    num_val_images = min(10, len(val_dataset.swaths))
 
     with torch.no_grad():
         pbar = tqdm(range(num_val_images), desc=f'Validation {epoch}')
@@ -216,10 +216,13 @@ def validate(model, val_loader, criteria, epoch, logger, device):
 
             # Process each patch
             for patch, (y, x) in zip(patches, positions):
-                # Convert to tensor and add batch/channel dimensions
-                patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).float().to(device)
+                # CREATE LOW-RESOLUTION VERSION OF THE PATCH
+                patch_lr = cv2.resize(patch, (patch.shape[1] // 4, patch.shape[0] // 4), interpolation=cv2.INTER_AREA)
 
-                # Process through model
+                # Convert to tensor and add batch/channel dimensions
+                patch_tensor = torch.from_numpy(patch_lr).unsqueeze(0).unsqueeze(0).float().to(device)
+
+                # Process through model (this will upscale back to original size)
                 sr_patch = model(patch_tensor)
                 sr_patch = sr_patch[0, 0].cpu().numpy()
 
@@ -231,20 +234,15 @@ def validate(model, val_loader, criteria, epoch, logger, device):
             sr_full = sr_full / np.maximum(weight_map, 1.0)
             sr_full = np.clip(sr_full, 0, 1)
 
-            # Create LR version of full image for loss calculation
-            lr_full = cv2.resize(sr_full, (w_full // 4, h_full // 4), interpolation=cv2.INTER_AREA)
-
-            # Convert to tensors for loss calculation
-            sr_tensor = torch.from_numpy(sr_full).unsqueeze(0).unsqueeze(0).float().to(device)
-            gt_tensor = torch.from_numpy(patches[0]).unsqueeze(0).unsqueeze(0).float().to(
-                device)  # This needs the full GT
-
-            # For proper validation, we need the full GT image. Let's get it:
+            # Use the original full image as ground truth
             swath = val_dataset.swaths[idx]
             temp = swath['temperature'].astype(np.float32)
             temp = cv2.resize(temp, (208, 2000), interpolation=cv2.INTER_LINEAR)
             temp_min, temp_max = np.min(temp), np.max(temp)
             temp_norm = (temp - temp_min) / (temp_max - temp_min) if temp_max > temp_min else np.zeros_like(temp)
+
+            # Convert to tensors for loss calculation
+            sr_tensor = torch.from_numpy(sr_full).unsqueeze(0).unsqueeze(0).float().to(device)
             gt_tensor = torch.from_numpy(temp_norm).unsqueeze(0).unsqueeze(0).float().to(device)
 
             # Calculate losses on full images
@@ -271,7 +269,6 @@ def validate(model, val_loader, criteria, epoch, logger, device):
 
     logger.log_validation(epoch, losses.avg, psnrs.avg, ssims.avg)
     return losses.avg, psnrs.avg, ssims.avg
-
 
 def main(args):
     """Основная функция обучения"""

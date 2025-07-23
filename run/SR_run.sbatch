@@ -90,7 +90,7 @@ apptainer exec --nv \
     --batch_size 8 \
     --num_epochs 70 \
     --lr 5e-4
-    --max_files 100
+    --max_files 80
 
 echo "============================================"
 echo "Temperature SwinIR Training Job Finished: $(date)"
